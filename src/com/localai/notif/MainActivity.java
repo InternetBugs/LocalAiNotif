@@ -336,7 +336,7 @@ public final class MainActivity extends Activity implements ModelDownloadManager
         reduceCard.addView(HyperSettingsUi.createInsetDivider(this, mPalette));
 
         mReduceSoundsRow = HyperSettingsUi.createSwitchRow(this, mPalette,
-                "保留通知音和系统音效", "普通通知也可按原设置响铃，触摸等系统音效跟随手机设置。",
+                "保留应用内声音和系统音效", "音乐、游戏和触摸音效按原设置播放。普通通知静音，重要通知放行后可响铃。",
                 initialReduceSounds, false, false);
         mReduceSoundsRow.row.setOnClickListener(view -> {
             boolean target = !mReduceSoundsRow.toggle.isChecked();
@@ -829,7 +829,7 @@ public final class MainActivity extends Activity implements ModelDownloadManager
             }
         } catch (PackageManager.NameNotFoundException ignored) {
         }
-        return "v1.0.0";
+        return "v" + Config.MODULE_VERSION_NAME;
     }
 
     private int dp(float value) {

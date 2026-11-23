@@ -1,131 +1,93 @@
 package com.localai.notif;
 
-import android.content.Context;
-import android.media.AudioAttributes;
+import android.app.Notification;
 import android.net.Uri;
-import android.os.VibrationEffect;
 import android.service.notification.StatusBarNotification;
+import android.util.Log;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.util.Collections;
-import java.util.Map;
-import java.util.WeakHashMap;
+import java.util.function.BiConsumer;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 
 final class ReduceNotificationSounds {
-    static boolean isNotificationUsage(int usage) {
-        return usage == AudioAttributes.USAGE_NOTIFICATION
-                || usage == AudioAttributes.USAGE_NOTIFICATION_EVENT
-                || usage == AudioAttributes.USAGE_NOTIFICATION_COMMUNICATION_INSTANT
-                || usage == AudioAttributes.USAGE_NOTIFICATION_COMMUNICATION_DELAYED;
-    }
+    private static final int ALERT_SOUND = 2;
+    private final ThreadLocal<Object> mutedRecord = new ThreadLocal<>();
+    private final ThreadLocal<Object> replayRecord = new ThreadLocal<>();
+    private final Method getService;
 
-    private static final class Attempt {
-        final Object record;
-        final boolean alreadySounded;
-        boolean checkingMute;
-        boolean playingSound;
-
-        Attempt(Object record, boolean alreadySounded) {
-            this.record = record;
-            this.alreadySounded = alreadySounded;
-        }
-    }
-
-    static void install(ModuleMain module, ClassLoader loader, Class<?> recordType, BooleanSupplier enabled)
-            throws ReflectiveOperationException {
+    ReduceNotificationSounds(ModuleMain module, ClassLoader loader, Class<?> recordType,
+            BooleanSupplier enabled, BiConsumer<Object, StatusBarNotification> defer) throws Exception {
+        getService = loader.loadClass("android.os.ServiceManager").getMethod("getService", String.class);
         Class<?> attention = loader.loadClass("com.android.server.notification.NotificationAttentionHelper");
-        Class<?> signals = loader.loadClass(attention.getName() + "$Signals");
-        Class<?> miui = loader.loadClass("com.android.server.notification.NotificationManagerServiceImpl");
-        Method buzz = attention.getDeclaredMethod("buzzBeepBlinkLocked", recordType, signals);
-        Method mute = attention.getDeclaredMethod("shouldMuteNotificationLocked", recordType, signals, boolean.class);
-        Method vibrate = attention.getDeclaredMethod("playVibration", recordType, VibrationEffect.class, boolean.class);
+        Method buzz = attention.getDeclaredMethod("buzzBeepBlinkLocked", recordType,
+                loader.loadClass(attention.getName() + "$Signals"));
         Method play = attention.getDeclaredMethod("playSound", recordType, Uri.class);
-        Method silence = miui.getDeclaredMethod("isSilenceMode", recordType);
-        Method flash = loader.loadClass("android.view.accessibility.AccessibilityManager")
-                .getDeclaredMethod("startFlashNotificationEvent", Context.class, int.class, String.class);
-        Method intercepted = recordType.getDeclaredMethod("isIntercepted");
-        Method sound = recordType.getDeclaredMethod("getSound");
-        Method attributes = recordType.getDeclaredMethod("getAudioAttributes");
+        Method playInCall = attention.getDeclaredMethod("playInCallNotification");
         Method getSbn = recordType.getDeclaredMethod("getSbn");
-        intercepted.setAccessible(true);
-        sound.setAccessible(true);
-        attributes.setAccessible(true);
+        Method intercepted = recordType.getDeclaredMethod("isIntercepted");
+        Field status = recordType.getDeclaredField("mNRStatusStub");
+        Method allowsSound = status.getType().getMethod("isStatusBarAllowSound");
         getSbn.setAccessible(true);
+        intercepted.setAccessible(true);
+        status.setAccessible(true);
+        allowsSound.setAccessible(true);
 
-        ThreadLocal<Attempt> current = new ThreadLocal<>();
-        Map<Object, Boolean> sounded = Collections.synchronizedMap(new WeakHashMap<>());
-        module.hook(mute).intercept(chain -> {
-            Attempt attempt = current.get();
-            if (attempt == null || attempt.alreadySounded || attempt.record != chain.getArg(0)) return chain.proceed();
-            attempt.checkingMute = true;
+        Consumer<Object> deferIfAllowed = record -> {
             try {
-                return chain.proceed();
-            } finally {
-                attempt.checkingMute = false;
+                Object statusStub = status.get(record);
+                if (statusStub != null && (boolean) allowsSound.invoke(statusStub)) {
+                    defer.accept(record, (StatusBarNotification) getSbn.invoke(record));
+                }
+            } catch (ReflectiveOperationException error) {
+                Log.w("LocalAiNotif", "Could not read notification sound allowance", error);
             }
-        });
-        module.hook(intercepted).intercept(chain -> {
-            Attempt attempt = current.get();
-            if (attempt != null && attempt.checkingMute && attempt.record == chain.getThisObject()) return false;
-            return chain.proceed();
-        });
+        };
         module.hook(play).intercept(chain -> {
-            Attempt attempt = current.get();
-            if (attempt == null || attempt.alreadySounded || attempt.record != chain.getArg(0)) return chain.proceed();
-            attempt.playingSound = true;
-            try {
-                return chain.proceed();
-            } finally {
-                attempt.playingSound = false;
-            }
+            Object record = chain.getArg(0);
+            if (record != mutedRecord.get()) return chain.proceed();
+            deferIfAllowed.accept(record);
+            return false;
         });
-        module.hook(silence).intercept(chain -> {
-            Attempt attempt = current.get();
-            if (attempt != null && attempt.playingSound && attempt.record == chain.getArg(0)) return false;
-            return chain.proceed();
+        module.hook(playInCall).intercept(chain -> {
+            Object record = mutedRecord.get();
+            if (record == null) return chain.proceed();
+            deferIfAllowed.accept(record);
+            return null;
         });
-        module.hook(vibrate).intercept(chain -> {
-            Attempt attempt = current.get();
-            if (attempt != null && !attempt.alreadySounded && attempt.record == chain.getArg(0)) return false;
-            return chain.proceed();
-        });
-        module.hook(flash).intercept(chain -> {
-            Attempt attempt = current.get();
-            if (attempt != null && !attempt.alreadySounded && (int) chain.getArg(1) == 3) return false;
-            return chain.proceed();
-        });
-        module.hook(sound).intercept(chain -> {
-            Attempt attempt = current.get();
-            if (attempt != null && attempt.alreadySounded && attempt.record == chain.getThisObject()) return null;
-            return chain.proceed();
-        });
-        module.deoptimize(mute);
-        module.deoptimize(buzz);
-        module.deoptimize(miui.getDeclaredMethod("isDeniedPlaySound", android.media.AudioManager.class, recordType));
         module.hook(buzz).intercept(chain -> {
             Object record = chain.getArg(0);
-            boolean previousSound = sounded.containsKey(record);
-            if (!enabled.getAsBoolean() && !previousSound) return chain.proceed();
-            boolean replay = previousSound && ReduceInterruptions.isBreakthrough((StatusBarNotification) getSbn.invoke(record));
-            if (!replay) {
-                if (!enabled.getAsBoolean() || !(boolean) intercepted.invoke(record)) return chain.proceed();
-                AudioAttributes audio = (AudioAttributes) attributes.invoke(record);
-                Uri uri = (Uri) sound.invoke(record);
-                if (audio == null || !isNotificationUsage(audio.getUsage()) || uri == null || Uri.EMPTY.equals(uri)) {
-                    return chain.proceed();
-                }
+            if (!enabled.getAsBoolean() || record == replayRecord.get() || (boolean) intercepted.invoke(record)) {
+                return chain.proceed();
             }
-            Attempt previous = current.get();
-            current.set(new Attempt(record, replay));
+            StatusBarNotification sbn = (StatusBarNotification) getSbn.invoke(record);
+            if (sbn == null || ReduceInterruptions.isBreakthrough(sbn)) return chain.proceed();
+            Notification notification = sbn.getNotification();
+            if (!ReduceInterruptions.isEligibleForClassification(notification)
+                    && (notification.flags & Notification.FLAG_GROUP_SUMMARY) == 0) return chain.proceed();
+            Object previous = mutedRecord.get();
+            mutedRecord.set(record);
             try {
-                int effects = (int) chain.proceed();
-                if (!replay && (effects & 2) != 0) sounded.put(record, true);
-                return effects;
+                return chain.proceed();
             } finally {
-                if (previous == null) current.remove();
-                else current.set(previous);
+                if (previous == null) mutedRecord.remove();
+                else mutedRecord.set(previous);
             }
         });
+        module.deoptimize(buzz);
+    }
+
+    void playApprovedSound(Object record, String key) throws ReflectiveOperationException {
+        Object notificationService = getService.invoke(null, "notification");
+        Method requestAlert = notificationService.getClass()
+                .getMethod("buzzBeepBlinkForNotification", String.class, int.class);
+        requestAlert.setAccessible(true);
+        replayRecord.set(record);
+        try {
+            requestAlert.invoke(notificationService, key, ALERT_SOUND);
+        } finally {
+            replayRecord.remove();
+        }
     }
 }

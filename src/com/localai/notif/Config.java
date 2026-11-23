@@ -51,7 +51,8 @@ public final class Config {
     public static final boolean DEFAULT_SHOW_IN_SYSTEM_SETTINGS = false;
     public static final String EXTRA_FROM_SYSTEM_SETTINGS = "localai_from_system_settings";
     public static final String LAUNCHER_ALIAS_CLASS = "com.localai.notif.MainActivityLauncher";
-    static final int MODULE_VERSION_CODE = 20;
+    static final int MODULE_VERSION_CODE = 21;
+    static final String MODULE_VERSION_NAME = "1.1.0";
     static final String KEY_MODEL_READY = "model_ready";
     static final String KEY_ENGINE_LOADED = "engine_loaded";
     static final String KEY_ENGINE_LOADING = "engine_loading";

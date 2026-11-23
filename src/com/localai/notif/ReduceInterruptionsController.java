@@ -60,6 +60,8 @@ final class ReduceInterruptionsController {
     private static final int MUTE_REASON_SILENT_UPDATE = 64;
     private static final long REALERT_ALLOW_WINDOW_MS = 6_000L;
     private static final int KEEP_DURATION = -1;
+    private static final int OP_PLAY_AUDIO = 28;
+    private static final int STREAM_ASSISTANT = 11;
 
     private final Context context;
     private final Object service;
@@ -95,6 +97,8 @@ final class ReduceInterruptionsController {
     private volatile boolean lockScreenOnly = Config.DEFAULT_REDUCE_LOCK_SCREEN_ONLY;
     private volatile boolean filterIcons;
     private volatile boolean normalSounds;
+    private ReduceNotificationSounds notificationSounds;
+    private final Map<String, Object> deferredSoundRecords = new ConcurrentHashMap<>();
     private Method refreshAudioStreams;
     private Object audioService;
     private final AtomicBoolean iconRefreshPending = new AtomicBoolean();
@@ -195,7 +199,13 @@ final class ReduceInterruptionsController {
             Class<?> recordClass, Class<?> zenHelperClass) {
         installSoundPolicy(module, loader, zenHelperClass);
         try {
-            ReduceNotificationSounds.install(module, loader, recordClass, () -> reduceActive && normalSounds);
+            notificationSounds = new ReduceNotificationSounds(module, loader, recordClass,
+                    () -> normalSounds && isEffectiveNow(), (record, sbn) -> {
+                        trackInterceptedCandidate(sbn);
+                        if (pendingFingerprints.containsKey(sbn.getKey())) {
+                            deferredSoundRecords.put(sbn.getKey(), record);
+                        }
+                    });
         } catch (Throwable error) {
             Log.w(TAG, "Could not install Reduce Interruptions notification sound handling", error);
         }
@@ -285,12 +295,6 @@ final class ReduceInterruptionsController {
                             };
                             // Usage 5 = AudioAttributes.USAGE_NOTIFICATION
                             applyRestriction.invoke(null, Boolean.FALSE, 5, appOps, exempt);
-                            if (normalSounds) {
-                                Method setRestriction = ModuleMain.findMethod(AppOpsManager.class, "setRestriction",
-                                        int.class, int.class, int.class, String[].class);
-                                if (setRestriction != null) setRestriction.invoke(appOps, 28,
-                                        AudioAttributes.USAGE_NOTIFICATION, AppOpsManager.MODE_ALLOWED, null);
-                            }
                         }
                     } catch (Throwable inner) {
                         Log.w(TAG, "Failed to ensure ReduceInterruptions notification AppOps exemption", inner);
@@ -387,13 +391,12 @@ final class ReduceInterruptionsController {
             Method apply = ModuleMain.findMethod(zenClass, "applyRestrictions", boolean.class, IntPredicate.class, int.class);
             if (apply != null) {
                 module.hook(apply).intercept(chain -> {
-                    if (!(boolean) chain.getArg(0) || (int) chain.getArg(2) != 28 || !reduceActive || !normalSounds) {
+                    if (!(boolean) chain.getArg(0) || (int) chain.getArg(2) != OP_PLAY_AUDIO || !reduceActive || !normalSounds) {
                         return chain.proceed();
                     }
                     IntPredicate original = (IntPredicate) chain.getArg(1);
-                    IntPredicate mute = usage -> !ReduceNotificationSounds.isNotificationUsage(usage)
-                            && usage != AudioAttributes.USAGE_ASSISTANCE_SONIFICATION && original.test(usage);
-                    return chain.proceed(new Object[]{true, mute, 28});
+                    IntPredicate mute = usage -> !isAppOrSystemPlayback(usage) && original.test(usage);
+                    return chain.proceed(new Object[]{true, mute, OP_PLAY_AUDIO});
                 });
             }
             Class<?> audio = loader.loadClass("com.android.server.audio.AudioService");
@@ -401,18 +404,26 @@ final class ReduceInterruptionsController {
             if (affected == null) return;
             module.hook(affected).intercept(chain -> {
                 int stream = (int) chain.getArg(0);
-                if (reduceActive && normalSounds && (stream == AudioManager.STREAM_SYSTEM
+                if (reduceActive && normalSounds && (stream == AudioManager.STREAM_MUSIC
+                        || stream == AudioManager.STREAM_SYSTEM || stream == STREAM_ASSISTANT
                         || stream == AudioManager.STREAM_NOTIFICATION)) return false;
                 return chain.proceed();
             });
             Method updateMute = ModuleMain.findMethod(audio, "updateStreamMuteFromRingerMode");
             if (updateMute != null) module.deoptimize(updateMute);
-            audioService = loader.loadClass("android.os.ServiceManager").getMethod("getService", String.class)
-                    .invoke(null, Context.AUDIO_SERVICE);
-            if (audio.isInstance(audioService)) refreshAudioStreams = ModuleMain.findMethod(audio, "updateRingerModeMutedStreams");
+            refreshAudioStreams = ModuleMain.findMethod(audio, "updateRingerModeMutedStreams");
         } catch (Throwable error) {
             Log.w(TAG, "Could not install Reduce Interruptions audio policy", error);
         }
+    }
+
+    static boolean isAppOrSystemPlayback(int usage) {
+        return switch (usage) {
+            case AudioAttributes.USAGE_UNKNOWN, AudioAttributes.USAGE_MEDIA, AudioAttributes.USAGE_GAME,
+                    AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE, AudioAttributes.USAGE_ASSISTANT,
+                    AudioAttributes.USAGE_ASSISTANCE_SONIFICATION, AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY -> true;
+            default -> false;
+        };
     }
 
     private void registerReceivers() {
@@ -606,6 +617,7 @@ final class ReduceInterruptionsController {
         pendingFingerprints.clear();
         resolvedFingerprints.clear();
         realertDeadlines.clear();
+        deferredSoundRecords.clear();
         grantedIconVersions.clear();
     }
 
@@ -717,6 +729,7 @@ final class ReduceInterruptionsController {
         pendingFingerprints.keySet().retainAll(activeKeys);
         resolvedFingerprints.keySet().retainAll(activeKeys);
         realertDeadlines.keySet().retainAll(activeKeys);
+        deferredSoundRecords.keySet().retainAll(activeKeys);
         grantedIconVersions.keySet().retainAll(activeKeys);
     }
 
@@ -732,8 +745,9 @@ final class ReduceInterruptionsController {
         }
         pendingFingerprints.remove(key, fingerprint);
         resolvedFingerprints.put(key, fingerprint);
+        Object deferredSound = deferredSoundRecords.remove(key);
 
-        if (!reduceActive || !classified || !vip || record == null || sbn == null) {
+        if (!isEffectiveNow() || !classified || !vip || record == null || sbn == null) {
             return; // Fail-closed: remain silently in lockscreen & notification shade.
         }
         if (recordsByKey.get(key) != record) {
@@ -747,6 +761,10 @@ final class ReduceInterruptionsController {
         }
 
         try {
+            if (deferredSound != null && !(boolean) recordIsIntercepted.invoke(record)) {
+                if (normalSounds && deferredSound == record) notificationSounds.playApprovedSound(record, key);
+                return;
+            }
             long seq = alertSeqGen.incrementAndGet();
             ReduceInterruptions.markBreakthrough(sbn, seq);
             recordSetIntercepted.invoke(record, Boolean.FALSE);
@@ -893,7 +911,13 @@ final class ReduceInterruptionsController {
         long token = Binder.clearCallingIdentity();
         try {
             zenApplyRestrictions.invoke(zenModeHelper);
-            if (refreshAudioStreams != null) refreshAudioStreams.invoke(audioService);
+            if (refreshAudioStreams != null) {
+                if (audioService == null) {
+                    audioService = Class.forName("android.os.ServiceManager").getMethod("getService", String.class)
+                            .invoke(null, Context.AUDIO_SERVICE);
+                }
+                if (refreshAudioStreams.getDeclaringClass().isInstance(audioService)) refreshAudioStreams.invoke(audioService);
+            }
         } catch (Throwable t) {
             Log.w(TAG, "Failed to re-apply ZenMode restrictions", t);
         } finally {

@@ -739,10 +739,10 @@ public final class AboutActivity extends Activity {
     private String resolveFullVersionLabel() {
         try {
             PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
-            String name = info.versionName != null ? info.versionName : "1.0.0";
+            String name = info.versionName != null ? info.versionName : Config.MODULE_VERSION_NAME;
             return "v" + name + " (" + info.getLongVersionCode() + ")";
         } catch (PackageManager.NameNotFoundException ignored) {
-            return "v1.0.0";
+            return "v" + Config.MODULE_VERSION_NAME;
         }
     }
 
