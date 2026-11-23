@@ -1,0 +1,56 @@
+package com.localai.notif;
+
+public final class Config {
+    public static final String AUTHORITY = "com.localai.notif.provider";
+    public static final String PREFS_NAME = "localai_notif_prefs";
+
+    public static final String KEY_SUMMARIZE_SCREEN_ON = "summarize_screen_on";
+    public static final String KEY_NOTIFICATION_THRESHOLD = "notification_threshold";
+    public static final String KEY_WAIT_SECONDS = "wait_seconds";
+    public static final boolean DEFAULT_SUMMARIZE_SCREEN_ON = true;
+    public static final int DEFAULT_NOTIFICATION_THRESHOLD = 1;
+    public static final int DEFAULT_WAIT_SECONDS = 0;
+    public static final String KEY_MODEL_PATH = "model_path";
+    public static final String DEFAULT_MODEL_PATH =
+            "/data/user/0/com.localai.notif/files/models/qwen3-1.7b-mnn";
+    public static final String KEY_CLASSIFY_ENABLED = "classify_enabled";
+    public static final boolean DEFAULT_CLASSIFY_ENABLED = true;
+    public static final String KEY_PRIORITY_ENABLED = "priority_enabled";
+    public static final boolean DEFAULT_PRIORITY_ENABLED = true;
+    public static final String KEY_REDUCE_ENABLED = "reduce_interruptions_enabled";
+    public static final boolean DEFAULT_REDUCE_ENABLED = false;
+    public static final String KEY_REDUCE_LOCK_SCREEN_ONLY = "reduce_lock_screen_only";
+    public static final boolean DEFAULT_REDUCE_LOCK_SCREEN_ONLY = false;
+    static final String METHOD_SET_PRIORITY_ENABLED = "set_priority_enabled";
+    static final String METHOD_SET_CONFIG = "set_config";
+    static final String METHOD_SYNC_REDUCE_STATE = "sync_reduce_state";
+    static final String METHOD_SET_MODEL_PATH = "set_model_path";
+    static final String METHOD_RESET_ENGINE = "reset_engine";
+    public static final String ACTION_CONFIG_CHANGED = "com.localai.notif.CONFIG_CHANGED";
+
+    public static final String KEY_ALL_APPS = "all_apps";
+    public static final boolean DEFAULT_ALL_APPS = true;
+    public static final String KEY_MIN_LENGTH = "min_length";
+    public static final String KEY_GROUP_SUMMARY = "group_summary";
+    public static final boolean DEFAULT_GROUP_SUMMARY = true;
+    static final String KEY_INCLUDE_ITEM_SUMMARIES = "include_item_summaries";
+
+    public static final String KEY_DOWNLOAD_SOURCE = "download_source";
+    public static final String DOWNLOAD_SOURCE_MODELSCOPE = "modelscope";
+    public static final String DOWNLOAD_SOURCE_HF_MIRROR = "hf_mirror";
+    public static final String DOWNLOAD_SOURCE_HUGGINGFACE = "huggingface";
+    public static final String DEFAULT_DOWNLOAD_SOURCE = DOWNLOAD_SOURCE_MODELSCOPE;
+    public static final String KEY_WIFI_ONLY_DOWNLOAD = "wifi_only_download";
+    public static final boolean DEFAULT_WIFI_ONLY_DOWNLOAD = true;
+    public static final String KEY_ALWAYS_LOAD_MODEL = "always_load_model";
+    public static final boolean DEFAULT_ALWAYS_LOAD_MODEL = false;
+    static final String KEY_MODEL_READY = "model_ready";
+    static final String KEY_ENGINE_LOADED = "engine_loaded";
+    static final String KEY_ENGINE_LOADING = "engine_loading";
+    static final String KEY_RESET_PRELOAD = "preload";
+    static final String ACTION_ENGINE_STATE_CHANGED = "com.localai.notif.ENGINE_STATE_CHANGED";
+
+    public static final int DEFAULT_MIN_LENGTH = 15;
+
+    private Config() {}
+}

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">端侧AI通知总结</string>
+    <string name="description">端侧通知组摘要、噪音静默与重要通知置顶</string>
+</resources>

@@ -1,0 +1,23 @@
+# Build outputs & release artifacts
+build/
+dist/
+*.apk
+*.idsig
+*.dex
+*.class
+*.ap_
+
+# Local debug screenshots & temporary dumps
+com_stub_rendered.java
+fold_*.png
+shade*.png
+*.log
+*.tmp
+
+# IDE & OS metadata
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+local.properties

@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.localai.notif"
+    android:versionCode="17"
+    android:versionName="0.8.0">
+
+    <uses-sdk
+        android:minSdkVersion="34"
+        android:targetSdkVersion="36" />
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <application
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="@string/app_name"
+        android:description="@string/description"
+        android:theme="@android:style/Theme.DeviceDefault.Light"
+        android:allowBackup="true"
+        android:debuggable="true"
+        android:extractNativeLibs="false">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.INFO" />
+                <category android:name="de.robv.android.xposed.category.MODULE_SETTINGS" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".SummarySettingsActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".ModelDownloadActivity"
+            android:exported="false" />
+
+        <service
+            android:name=".ModelDownloadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <service
+            android:name=".ModelKeepAliveService"
+            android:exported="true"
+            android:permission="android.permission.STATUS_BAR_SERVICE"
+            android:process=":inference" />
+
+        <service
+            android:name=".ReduceInterruptionsTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_reduce_interruptions"
+            android:label="减少干扰"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <provider
+            android:name=".InferenceProvider"
+            android:authorities="com.localai.notif.provider"
+            android:exported="true"
+            android:process=":inference" />
+    </application>
+</manifest>

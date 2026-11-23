@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Luminous HyperOS blue base gradient -->
+    <path android:pathData="M0,0H108V108H0Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="16"
+                android:startY="12"
+                android:endX="94"
+                android:endY="98">
+                <item android:offset="0" android:color="#FF5CB2FF" />
+                <item android:offset="0.52" android:color="#FF3482FF" />
+                <item android:offset="1" android:color="#FF1E5AE6" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Soft upper-left HyperOS glass-lit glow -->
+    <path android:pathData="M0,0H108V108H0Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="radial"
+                android:centerX="32"
+                android:centerY="24"
+                android:gradientRadius="58">
+                <item android:offset="0" android:color="#42FFFFFF" />
+                <item android:offset="1" android:color="#00FFFFFF" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Subtle lower-right ambient depth -->
+    <path android:pathData="M0,0H108V108H0Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="radial"
+                android:centerX="86"
+                android:centerY="90"
+                android:gradientRadius="54">
+                <item android:offset="0" android:color="#24103B9E" />
+                <item android:offset="1" android:color="#00103B9E" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>
