@@ -12,12 +12,18 @@ import android.os.Looper;
 import android.os.PowerManager;
 import android.service.notification.StatusBarNotification;
 import android.util.Log;
+import android.view.Gravity;
 import android.view.View;
+import android.view.ViewTreeObserver;
+import android.widget.ImageView;
+import android.widget.LinearLayout;
+import android.widget.TextView;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
@@ -50,12 +56,17 @@ final class SystemUiReduceInterruptions {
 
     private final Set<Object> quietTiles = Collections.newSetFromMap(new WeakHashMap<>());
     private final Set<View> zenIconViews = Collections.newSetFromMap(new WeakHashMap<>());
+    private final Set<ModeIndicator> modeIndicators = Collections.newSetFromMap(new WeakHashMap<>());
     private final Map<String, Long> alertedBreakthroughSeqs = new ConcurrentHashMap<>();
     private final Map<String, Long> soundWakeSeqByKey = new ConcurrentHashMap<>();
 
     private volatile Context appContext;
     private volatile boolean reduceActive;
+    private boolean filterIcons;
+    private boolean keyguardShowing = true;
     private volatile boolean lockScreenOnly;
+    private volatile long reduceDeadline;
+    private boolean receivedControllerState;
     private volatile Object alertViewBoundListener;
     private volatile Method alertOnViewBound;
 
@@ -72,6 +83,7 @@ final class SystemUiReduceInterruptions {
     private Field entrySbnField;
     private Field entryInterruptionField;
     private Field expandedBuzzBeepedField;
+    private SystemUiNotificationIcons notificationIcons;
 
     static void install(ModuleMain module, ClassLoader loader) {
         try {
@@ -83,9 +95,16 @@ final class SystemUiReduceInterruptions {
     }
 
     private SystemUiReduceInterruptions(ModuleMain module, ClassLoader loader) {
+        try {
+            notificationIcons = new SystemUiNotificationIcons(module, loader, this::ensureInitialized);
+        } catch (Throwable error) {
+            module.log(Log.WARN, TAG, "Could not install status bar notification icon filter", error);
+        }
         hookQuietModeTile(module, loader);
         hookStatusBarZenIcon(module, loader);
+        hookPhoneStatusBar(module, loader);
         hookVisualInterruptionAndAlerts(module, loader);
+        SystemUiVolumeReduce.install(module, loader, this::ensureInitialized);
     }
 
     private void hookQuietModeTile(ModuleMain module, ClassLoader loader) {
@@ -146,15 +165,107 @@ final class SystemUiReduceInterruptions {
                     // to traditional strict DND instead of turning DND completely off.
                     Context ctx = (Context) tileContextField.get(tile);
                     if (ctx != null) {
-                        reduceActive = false;
                         requestSystemMode(ctx, ReduceInterruptions.MODE_STRICT_DND);
-                        refreshUiAfterStateChange();
                     }
                     return null;
                 });
             }
         } catch (Throwable t) {
             module.log(Log.WARN, TAG, "Failed to hook QuietModeTile", t);
+        }
+    }
+
+    private void hookPhoneStatusBar(ModuleMain module, ClassLoader loader) {
+        try {
+            Class<?> phone = loader.loadClass("com.android.systemui.statusbar.phone.MiuiPhoneStatusBarView");
+            Class<?> container = loader.loadClass("com.android.systemui.statusbar.views.MiuiStatusIconContainer");
+            Field left = ModuleMain.findField(phone, "mStatusBarLeftContainer");
+            Field right = ModuleMain.findField(phone, "mStatusBarStatusIcons");
+            Field ignored = ModuleMain.findField(container, "ignoredSlots");
+            Method inflate = ModuleMain.findMethod(phone, "onFinishInflate");
+            Method setIgnored = ModuleMain.findMethod(container, "setIgnoredSlots", List.class);
+            if (left == null || right == null || ignored == null || inflate == null || setIgnored == null) return;
+            module.hook(setIgnored).intercept(chain -> {
+                Object result = chain.proceed();
+                for (ModeIndicator icon : modeIndicators) {
+                    if (icon.right == chain.getThisObject()) {
+                        icon.ownsZenSlot = false;
+                        icon.update(showModeIconOnLeft());
+                    }
+                }
+                return result;
+            });
+            module.hook(inflate).intercept(chain -> {
+                Object result = chain.proceed();
+                View bar = (View) chain.getThisObject();
+                if (!(left.get(bar) instanceof LinearLayout group) || !(right.get(bar) instanceof View slots)) return result;
+                int clockId = bar.getResources().getIdentifier("clock", "id", "com.android.systemui");
+                if (!(group.findViewById(clockId) instanceof TextView clock) || clock.getParent() != group) return result;
+                @SuppressWarnings("unchecked")
+                List<String> ignoredSlots = (List<String>) ignored.get(slots);
+                ModeIndicator icon = new ModeIndicator(clock, slots, ignoredSlots);
+                int size = icon.getDrawable().getIntrinsicWidth();
+                LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(size, size);
+                params.gravity = Gravity.CENTER_VERTICAL;
+                params.setMarginEnd(Math.round(2 * bar.getResources().getDisplayMetrics().density));
+                group.addView(icon, group.indexOfChild(clock) + 1, params);
+                modeIndicators.add(icon);
+                icon.update(showModeIconOnLeft());
+                ensureInitialized(bar.getContext());
+                return result;
+            });
+        } catch (Throwable error) {
+            module.log(Log.WARN, TAG, "Could not attach Reduce Interruptions status bar indicator", error);
+        }
+    }
+
+    private static final class ModeIndicator extends ImageView implements ViewTreeObserver.OnPreDrawListener {
+        final TextView clock;
+        final View right;
+        final List<String> ignoredSlots;
+        boolean ownsZenSlot;
+        int tint;
+
+        ModeIndicator(TextView clock, View right, List<String> ignoredSlots) {
+            super(clock.getContext());
+            this.clock = clock;
+            this.right = right;
+            this.ignoredSlots = ignoredSlots;
+            setContentDescription("减少干扰");
+            setImageDrawable(ReduceInterruptions.createStatusBarDrawable(getContext()));
+            tint = clock.getCurrentTextColor();
+            getDrawable().setTint(tint);
+        }
+
+        void update(boolean active) {
+            setVisibility(active ? VISIBLE : GONE);
+            if (active && !ignoredSlots.contains("zen")) {
+                ignoredSlots.add("zen");
+                ownsZenSlot = true;
+                right.requestLayout();
+            } else if (!active && ownsZenSlot) {
+                ignoredSlots.remove("zen");
+                ownsZenSlot = false;
+                right.requestLayout();
+            }
+        }
+
+        @Override protected void onAttachedToWindow() {
+            super.onAttachedToWindow();
+            getViewTreeObserver().addOnPreDrawListener(this);
+        }
+
+        @Override protected void onDetachedFromWindow() {
+            getViewTreeObserver().removeOnPreDrawListener(this);
+            super.onDetachedFromWindow();
+        }
+
+        @Override public boolean onPreDraw() {
+            if (getVisibility() == VISIBLE && clock.getCurrentTextColor() != tint) {
+                tint = clock.getCurrentTextColor();
+                getDrawable().setTint(tint);
+            }
+            return true;
         }
     }
 
@@ -410,25 +521,66 @@ final class SystemUiReduceInterruptions {
         appContext = app;
         if (!receiverRegistered.compareAndSet(false, true)) return;
 
+        mainHandler.post(() -> {
+            KeyguardManager keyguard = app.getSystemService(KeyguardManager.class);
+            if (keyguard == null) return;
+            try {
+                keyguard.addKeyguardLockedStateListener(mainHandler::post, this::onKeyguardChanged);
+            } catch (RuntimeException error) {
+                Log.w(TAG, "Using screen broadcasts for status bar icon placement", error);
+                IntentFilter screen = new IntentFilter(Intent.ACTION_SCREEN_OFF);
+                screen.addAction(Intent.ACTION_SCREEN_ON);
+                screen.addAction(Intent.ACTION_USER_PRESENT);
+                app.registerReceiver(new BroadcastReceiver() {
+                    @Override public void onReceive(Context context, Intent intent) {
+                        onKeyguardChanged(Intent.ACTION_SCREEN_OFF.equals(intent.getAction()) || keyguard.isKeyguardLocked());
+                    }
+                }, screen, null, mainHandler, Context.RECEIVER_NOT_EXPORTED);
+            }
+            onKeyguardChanged(keyguard.isKeyguardLocked());
+        });
+
         try {
+            IntentFilter stateActions = new IntentFilter(ReduceInterruptions.ACTION_STATE_CHANGED);
+            stateActions.addAction(ReduceInterruptions.ACTION_ICON_FILTER);
             app.registerReceiver(new BroadcastReceiver() {
                 @Override
                 public void onReceive(Context context, Intent intent) {
+                    if (ReduceInterruptions.ACTION_ICON_FILTER.equals(intent.getAction())) {
+                        if (notificationIcons != null) {
+                            notificationIcons.setAllowedVersions(intent.getStringArrayListExtra(
+                                    ReduceInterruptions.EXTRA_ALLOWED_VERSIONS));
+                        }
+                        return;
+                    }
+                    receivedControllerState = true;
                     boolean active = intent.getBooleanExtra(ReduceInterruptions.EXTRA_ACTIVE, false);
+                    boolean filter = intent.getBooleanExtra(Config.KEY_REDUCE_FILTER_ICONS, filterIcons);
                     boolean lockOnly = intent.getBooleanExtra(
                             ReduceInterruptions.EXTRA_LOCK_SCREEN_ONLY, Config.DEFAULT_REDUCE_LOCK_SCREEN_ONLY);
-                    boolean changed = (active != reduceActive) || (lockOnly != lockScreenOnly);
+                    long deadline = intent.getLongExtra(ReduceInterruptions.EXTRA_DEADLINE, 0L);
+                    boolean changed = (active != reduceActive) || (lockOnly != lockScreenOnly)
+                            || (deadline != reduceDeadline) || (filter != filterIcons);
                     reduceActive = active;
+                    filterIcons = filter;
                     lockScreenOnly = lockOnly;
+                    reduceDeadline = deadline;
                     if (!active) {
                         alertedBreakthroughSeqs.clear();
                         soundWakeSeqByKey.clear();
+                    }
+                    boolean suppressDndExit = intent.getBooleanExtra(
+                            ReduceInterruptions.EXTRA_SUPPRESS_DND_EXIT, false);
+                    SystemUiVolumeReduce.applyReduceState(active, deadline, suppressDndExit);
+                    if (intent.getBooleanExtra(ReduceInterruptions.EXTRA_ANNOUNCE, false)) {
+                        SystemUiReduceIsland.onReduceChanged(active);
                     }
                     if (changed) {
                         refreshUiAfterStateChange();
                     }
                 }
-            }, new IntentFilter(ReduceInterruptions.ACTION_STATE_CHANGED), Context.RECEIVER_EXPORTED);
+            }, stateActions,
+                    "android.permission.STATUS_BAR_SERVICE", mainHandler, Context.RECEIVER_EXPORTED);
         } catch (Throwable t) {
             Log.w(TAG, "Failed to register SystemUI ReduceInterruptions receiver", t);
         }
@@ -443,20 +595,46 @@ final class SystemUiReduceInterruptions {
                             Config.KEY_REDUCE_LOCK_SCREEN_ONLY, Config.DEFAULT_REDUCE_LOCK_SCREEN_ONLY);
                     int zen = android.provider.Settings.Global.getInt(
                             app.getContentResolver(), "zen_mode", 0);
-                    boolean active = cfgReduce && zen == 1;
-                    if (active != reduceActive || cfgLockOnly != lockScreenOnly) {
-                        reduceActive = active;
+                    mainHandler.post(() -> {
+                        if (receivedControllerState) return;
+                        reduceActive = cfgReduce && zen == 1;
+                        filterIcons = cfg.getBoolean(Config.KEY_REDUCE_FILTER_ICONS, Config.DEFAULT_REDUCE_FILTER_ICONS);
                         lockScreenOnly = cfgLockOnly;
+                        SystemUiVolumeReduce.applyReduceState(reduceActive, 0L, false);
                         refreshUiAfterStateChange();
-                    }
+                    });
                 }
+            } catch (Throwable ignored) {
+            }
+        });
+
+        // Ask the controller for full live state (incl. timed deadline); the provider seed
+        // above is only a fallback for the case the broadcast path is unavailable.
+        ioExecutor.execute(() -> {
+            try {
+                Intent query = new Intent(ReduceInterruptions.ACTION_REQUEST_MODE)
+                        .setPackage("android")
+                        .addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY)
+                        .putExtra(ReduceInterruptions.EXTRA_MODE, ReduceInterruptions.MODE_QUERY);
+                app.sendBroadcast(query);
             } catch (Throwable ignored) {
             }
         });
     }
 
+    private boolean showModeIconOnLeft() {
+        return reduceActive && filterIcons && !keyguardShowing;
+    }
+
+    private void onKeyguardChanged(boolean showing) {
+        if (keyguardShowing == showing) return;
+        keyguardShowing = showing;
+        for (ModeIndicator icon : modeIndicators) icon.update(showModeIconOnLeft());
+    }
+
     private void refreshUiAfterStateChange() {
         mainHandler.post(() -> {
+            for (ModeIndicator icon : modeIndicators) icon.update(showModeIconOnLeft());
             ArrayList<Object> tilesCopy;
             synchronized (quietTiles) {
                 tilesCopy = new ArrayList<>(quietTiles);

@@ -1,6 +1,7 @@
 # Build outputs & release artifacts
 build/
 dist/
+dist_backup*/
 *.apk
 *.idsig
 *.dex

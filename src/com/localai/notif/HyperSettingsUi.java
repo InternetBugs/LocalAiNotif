@@ -1,5 +1,7 @@
 package com.localai.notif;
 
+import android.animation.Animator;
+import android.animation.AnimatorListenerAdapter;
 import android.animation.ArgbEvaluator;
 import android.animation.ValueAnimator;
 import android.app.Activity;
@@ -10,11 +12,15 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.ColorFilter;
 import android.graphics.Insets;
+import android.graphics.LinearGradient;
+import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.graphics.RectF;
+import android.graphics.Shader;
+import android.graphics.SweepGradient;
 import android.graphics.Typeface;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
@@ -78,14 +84,18 @@ final class HyperSettingsUi {
         final int previewNormalIcon;
         final int previewSkeletonPrimary;
         final int previewSkeletonSecondary;
-        final int previewPriorityOuterFill;
-        final int previewPriorityOuterStroke;
-        final int previewPriorityCard;
-        final int previewPriorityBadgeText;
-        final int previewPriorityIconBg;
-        final int previewPriorityIconGlyph;
-        final int previewPriorityLinePrimary;
-        final int previewPriorityLineSecondary;
+        final int previewNebulaCyan;
+        final int previewNebulaAzure;
+        final int previewNebulaViolet;
+        final int previewNebulaMoon;
+        final int previewNebulaCapsuleFill;
+        final int previewNebulaCapsuleStroke;
+        final int previewNebulaCard;
+        final int previewNebulaBadgeText;
+        final int previewNebulaPillBg;
+        final int previewNebulaIconBg;
+        final int previewNebulaLinePrimary;
+        final int previewNebulaLineSecondary;
 
         private Palette(
                 boolean dark,
@@ -118,14 +128,18 @@ final class HyperSettingsUi {
                 int previewNormalIcon,
                 int previewSkeletonPrimary,
                 int previewSkeletonSecondary,
-                int previewPriorityOuterFill,
-                int previewPriorityOuterStroke,
-                int previewPriorityCard,
-                int previewPriorityBadgeText,
-                int previewPriorityIconBg,
-                int previewPriorityIconGlyph,
-                int previewPriorityLinePrimary,
-                int previewPriorityLineSecondary) {
+                int previewNebulaCyan,
+                int previewNebulaAzure,
+                int previewNebulaViolet,
+                int previewNebulaMoon,
+                int previewNebulaCapsuleFill,
+                int previewNebulaCapsuleStroke,
+                int previewNebulaCard,
+                int previewNebulaBadgeText,
+                int previewNebulaPillBg,
+                int previewNebulaIconBg,
+                int previewNebulaLinePrimary,
+                int previewNebulaLineSecondary) {
             this.dark = dark;
             this.background = background;
             this.cardBackground = cardBackground;
@@ -156,14 +170,18 @@ final class HyperSettingsUi {
             this.previewNormalIcon = previewNormalIcon;
             this.previewSkeletonPrimary = previewSkeletonPrimary;
             this.previewSkeletonSecondary = previewSkeletonSecondary;
-            this.previewPriorityOuterFill = previewPriorityOuterFill;
-            this.previewPriorityOuterStroke = previewPriorityOuterStroke;
-            this.previewPriorityCard = previewPriorityCard;
-            this.previewPriorityBadgeText = previewPriorityBadgeText;
-            this.previewPriorityIconBg = previewPriorityIconBg;
-            this.previewPriorityIconGlyph = previewPriorityIconGlyph;
-            this.previewPriorityLinePrimary = previewPriorityLinePrimary;
-            this.previewPriorityLineSecondary = previewPriorityLineSecondary;
+            this.previewNebulaCyan = previewNebulaCyan;
+            this.previewNebulaAzure = previewNebulaAzure;
+            this.previewNebulaViolet = previewNebulaViolet;
+            this.previewNebulaMoon = previewNebulaMoon;
+            this.previewNebulaCapsuleFill = previewNebulaCapsuleFill;
+            this.previewNebulaCapsuleStroke = previewNebulaCapsuleStroke;
+            this.previewNebulaCard = previewNebulaCard;
+            this.previewNebulaBadgeText = previewNebulaBadgeText;
+            this.previewNebulaPillBg = previewNebulaPillBg;
+            this.previewNebulaIconBg = previewNebulaIconBg;
+            this.previewNebulaLinePrimary = previewNebulaLinePrimary;
+            this.previewNebulaLineSecondary = previewNebulaLineSecondary;
         }
 
         static Palette of(boolean dark) {
@@ -199,14 +217,18 @@ final class HyperSettingsUi {
                         0xFF343434, // Ordinary icon squircle
                         0xFF474747, // Ordinary skeleton title
                         0xFF343434, // Ordinary skeleton body
-                        0xFF241C15, // PrioritySectionFrame dark fill
-                        0xFFFFCD73, // PrioritySectionFrame amber stroke
-                        0xFF2F2720, // Priority inner notification card
-                        0xFFFFD484, // Priority label text
-                        0x3DF4C15C, // Priority icon soft amber badge
-                        0xFFFFCD73, // Priority icon glyph
-                        0x99FFE7BA, // Priority skeleton primary
-                        0x4DFFE7BA  // Priority skeleton secondary
+                        0xFF5CE1FF, // Nebula Sky Cyan
+                        0xFF3D8BFF, // Nebula Azure Core
+                        0xFFA17DFF, // Nebula Ice Violet
+                        0xFFEDF6FF, // Nebula Moon White
+                        0xC4192132, // Nebula smoked-glass micro-capsule fill
+                        0x66C6E4FF, // Nebula micro-capsule hairline rim
+                        0xFF1C2230, // Priority card cool tinted glass
+                        0xFFDCEEFF, // Nebula label ink
+                        0x2B5CE1FF, // Nebula soft pill background
+                        0x2B5CE1FF, // Nebula icon soft badge
+                        0xB0D8EEFF, // Priority skeleton primary
+                        0x57BBD9FF  // Priority skeleton secondary
                 );
             }
             return new Palette(
@@ -240,14 +262,18 @@ final class HyperSettingsUi {
                     0xFFE5E7EB, // Ordinary icon squircle
                     0xFFD0D4DC, // Ordinary skeleton title
                     0xFFE7E9EE, // Ordinary skeleton body
-                    0x1FF4C15C, // PrioritySectionFrame warm amber wash
-                    0xFFE5AA3C, // PrioritySectionFrame amber stroke
-                    0xFFFFFFFF, // Priority inner notification card
-                    0xFF9C6908, // Priority label text
-                    0xFFFFEAB8, // Priority icon warm badge
-                    0xFFC9860D, // Priority icon glyph
-                    0x755C4726, // Priority skeleton primary
-                    0x3D5C4726  // Priority skeleton secondary
+                    0xFF1CA3EC, // Nebula Deep Sky Cyan
+                    0xFF2B75F0, // Nebula HyperOS Azure
+                    0xFF7458F2, // Nebula Crisp Ice Violet
+                    0xFFD6E9FF, // Nebula Frosted Moon Highlight
+                    0xEEFFFFFF, // Nebula frosted-glass micro-capsule fill
+                    0x5C2B75F0, // Nebula micro-capsule hairline rim
+                    0xFFFFFFFF, // Priority card crisp white surface
+                    0xFF1F4ED8, // Nebula label ink
+                    0x1A2B75F0, // Nebula soft pill background
+                    0x1C2B75F0, // Nebula icon soft badge
+                    0x80203A6E, // Priority skeleton primary
+                    0x42203A6E  // Priority skeleton secondary
             );
         }
     }
@@ -1628,38 +1654,51 @@ final class HyperSettingsUi {
 
     /**
      * Dedicated HyperOS illustration for "AI 摘要":
-     * 3 separate notifications smoothly collapse into a single AI-summarized stack card.
+     * 3 separate notifications smoothly collapse into a clean Apple-Intelligence-minimal stack card
+     * featuring the frameless Nebula Aurora dual-sparkle + "AI 摘要" inline prefix, subtle
+     * Nebula-tinted summary lines, and a one-shot Wave Wash sweep when toggled ON.
      */
     static final class SummaryPreviewView extends View {
         private static final float STAGE_HEIGHT_DP = 166f;
         private static final float MAX_STAGE_WIDTH_DP = 320f;
-        private static final String AI_SUMMARY_LABEL = "AI 摘要";
+        private static final String AI_SUMMARY_LABEL = NebulaSummaryVisuals.LABEL;
         private static final String COUNT_LABEL = "3 条";
 
         private final Palette mPalette;
         private final Paint mFillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint mStrokePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint mBadgeTextPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint mGlintTextPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint mCountPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint mWavePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Path mStagePath = new Path();
         private final Path mCardPath = new Path();
         private final Path mIconPath = new Path();
         private final Path mSparklePath = new Path();
         private final RectF mRect = new RectF();
+        private final Matrix mShaderMatrix = new Matrix();
 
         private boolean mSummaryEnabled;
         private float mProgress;
+        private float mWashProgress;
+        private float mWashBoost;
         private ValueAnimator mAnimator;
+        private ValueAnimator mWashAnimator;
 
         SummaryPreviewView(Context context, Palette palette) {
             super(context);
             mPalette = palette;
             mFillPaint.setStyle(Paint.Style.FILL);
             mStrokePaint.setStyle(Paint.Style.STROKE);
+            mWavePaint.setStyle(Paint.Style.FILL);
             mBadgeTextPaint.setTypeface(typeface(600));
             mBadgeTextPaint.setTextSize(dpF(context, 9.2f));
+            mBadgeTextPaint.setLetterSpacing(0.015f);
+            mGlintTextPaint.setTypeface(typeface(600));
+            mGlintTextPaint.setTextSize(dpF(context, 9.2f));
+            mGlintTextPaint.setLetterSpacing(0.015f);
             mCountPaint.setTypeface(typeface(500));
-            mCountPaint.setTextSize(dpF(context, 9.5f));
+            mCountPaint.setTextSize(dpF(context, 9.4f));
             setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
         }
 
@@ -1669,6 +1708,7 @@ final class HyperSettingsUi {
             float target = enabled ? 1f : 0f;
             if (!animate || !ValueAnimator.areAnimatorsEnabled() || !isAttachedToWindow()) {
                 cancelAnimator();
+                cancelWashAnimator();
                 mProgress = target;
                 invalidate();
                 return;
@@ -1678,6 +1718,9 @@ final class HyperSettingsUi {
                 return;
             }
             cancelAnimator();
+            if (!enabled) {
+                cancelWashAnimator();
+            }
             mAnimator = ValueAnimator.ofFloat(mProgress, target);
             mAnimator.setDuration(280L);
             mAnimator.setInterpolator(HYPER_EASE);
@@ -1686,6 +1729,32 @@ final class HyperSettingsUi {
                 invalidate();
             });
             mAnimator.start();
+            if (enabled && changed) {
+                startPreviewWash();
+            }
+        }
+
+        private void startPreviewWash() {
+            if (!ValueAnimator.areAnimatorsEnabled() || !isAttachedToWindow()) return;
+            cancelWashAnimator();
+            mWashAnimator = ValueAnimator.ofFloat(0f, 1f);
+            mWashAnimator.setDuration(780L);
+            mWashAnimator.setInterpolator(HYPER_EASE);
+            mWashAnimator.addUpdateListener(anim -> {
+                mWashProgress = (float) anim.getAnimatedValue();
+                mWashBoost = NebulaSummaryVisuals.smoothEnvelope(mWashProgress, 0.24f);
+                invalidate();
+            });
+            mWashAnimator.addListener(new AnimatorListenerAdapter() {
+                @Override
+                public void onAnimationEnd(Animator animation) {
+                    mWashProgress = 0f;
+                    mWashBoost = 0f;
+                    mWashAnimator = null;
+                    invalidate();
+                }
+            });
+            mWashAnimator.start();
         }
 
         @Override
@@ -1711,8 +1780,10 @@ final class HyperSettingsUi {
             float strokeHalf = dpF(getContext(), 0.5f);
             mRect.set(stageLeft + strokeHalf, strokeHalf, stageRight - strokeHalf, totalH - strokeHalf);
             buildSquirclePath(mRect, stageRadius, mStagePath);
+            mFillPaint.setShader(null);
             mFillPaint.setColor(mPalette.previewStageBg);
             canvas.drawPath(mStagePath, mFillPaint);
+            mStrokePaint.setShader(null);
             mStrokePaint.setColor(mPalette.previewStageBorder);
             mStrokePaint.setStrokeWidth(dpF(getContext(), 1f));
             canvas.drawPath(mStagePath, mStrokePaint);
@@ -1728,7 +1799,7 @@ final class HyperSettingsUi {
             float rawTotalH = rawCardH * 3f + rawGap * 2f;
             float rawStartY = (totalH - rawTotalH) * 0.5f;
 
-            // ON state: 1 rich AI-summarized main card with 2 folded depth cards underneath
+            // ON state: 1 clean Apple-minimal AI-summarized card with 2 folded depth cards underneath
             float mergedH = dpF(getContext(), 76f);
             float stackPeek1 = dpF(getContext(), 7f);
             float stackPeek2 = dpF(getContext(), 13f);
@@ -1752,7 +1823,7 @@ final class HyperSettingsUi {
                     lerp(1f, mPalette.dark ? 0.68f : 0.84f, s),
                     1f - s, 0.44f, 0.70f);
 
-            // Draw Card 1 (primary card -> expands cleanly into AI Summary card when ON)
+            // Draw Card 1 (primary card -> transitions cleanly into frameless Nebula AI Summary card)
             float c1Top = lerp(rawStartY, mergedTop, s);
             float c1H = lerp(rawCardH, mergedH, s);
             float c1Bottom = c1Top + c1H;
@@ -1769,6 +1840,7 @@ final class HyperSettingsUi {
                 float line2Ratio) {
             mRect.set(left, top, right, bottom);
             buildSquirclePath(mRect, radius, mCardPath);
+            mFillPaint.setShader(null);
             if (!mPalette.dark) {
                 mFillPaint.setColor(withAlpha(0x0A000000, cardAlpha));
                 canvas.save();
@@ -1814,6 +1886,8 @@ final class HyperSettingsUi {
             mRect.set(left, top, right, bottom);
             buildSquirclePath(mRect, radius, mCardPath);
 
+            // Clean neutral card surface (Apple Intelligence minimal restraint: no colored card border)
+            mFillPaint.setShader(null);
             if (!mPalette.dark) {
                 mFillPaint.setColor(0x0D000000);
                 canvas.save();
@@ -1824,65 +1898,32 @@ final class HyperSettingsUi {
             mFillPaint.setColor(mPalette.previewNormalCard);
             canvas.drawPath(mCardPath, mFillPaint);
 
-            // Subtle blue accent hairline border when AI summary is active
-            if (s > 0.04f) {
-                mStrokePaint.setColor(withAlpha(mPalette.accent, (mPalette.dark ? 0.35f : 0.25f) * s));
-                mStrokePaint.setStrokeWidth(dpF(getContext(), 1.0f));
-                canvas.drawPath(mCardPath, mStrokePaint);
-            }
-
-            // App icon squircle (transitions from muted gray to soft HyperOS blue with sparkle)
-            float iconSize = lerp(dpF(getContext(), 20f), dpF(getContext(), 26f), s);
+            // Neutral app icon squircle (card chrome stays native and calm)
+            float iconSize = lerp(dpF(getContext(), 20f), dpF(getContext(), 25f), s);
             float iconLeft = left + dpF(getContext(), 11f);
-            float iconTop = lerp(top + (cardH - iconSize) * 0.5f, top + dpF(getContext(), 12f), s);
+            float iconTop = lerp(top + (cardH - iconSize) * 0.5f, top + dpF(getContext(), 13f), s);
             mRect.set(iconLeft, iconTop, iconLeft + iconSize, iconTop + iconSize);
-            buildSquirclePath(mRect, dpF(getContext(), 7.5f), mIconPath);
-            int iconFill = blendColor(mPalette.previewNormalIcon, mPalette.accentSoftBg, s);
-            mFillPaint.setColor(iconFill);
+            buildSquirclePath(mRect, dpF(getContext(), 7.2f), mIconPath);
+            mFillPaint.setColor(mPalette.previewNormalIcon);
             canvas.drawPath(mIconPath, mFillPaint);
-
-            if (s > 0.05f) {
-                drawSparkle(
-                        canvas,
-                        iconLeft + iconSize * 0.5f,
-                        iconTop + iconSize * 0.5f,
-                        dpF(getContext(), 5.2f) * (0.6f + 0.4f * s),
-                        withAlpha(mPalette.accent, s));
-            }
 
             float textLeft = iconLeft + iconSize + dpF(getContext(), 10f);
             float textRight = right - dpF(getContext(), 12f);
             float textMaxW = Math.max(0f, textRight - textLeft);
 
-            // Header row: title skeleton bar + ("3 条" & "AI 摘要" pill when ON)
-            float headerLineH = dpF(getContext(), 5.5f);
+            // Header row: native app title skeleton bar + subtle "3 条" count badge when ON
+            float headerLineH = dpF(getContext(), 5.4f);
             float headerY = lerp(top + (cardH - dpF(getContext(), 14.2f)) * 0.5f, top + dpF(getContext(), 15f), s);
             mFillPaint.setColor(mPalette.previewSkeletonPrimary);
-            mRect.set(textLeft, headerY, textLeft + textMaxW * lerp(0.42f, 0.36f, s), headerY + headerLineH);
+            mRect.set(textLeft, headerY, textLeft + textMaxW * lerp(0.42f, 0.38f, s), headerY + headerLineH);
             canvas.drawRoundRect(mRect, headerLineH * 0.5f, headerLineH * 0.5f, mFillPaint);
 
             if (s > 0.05f) {
-                // Soft blue "AI 摘要" pill at top-right
-                float pillH = dpF(getContext(), 15f);
-                float labelW = mBadgeTextPaint.measureText(AI_SUMMARY_LABEL);
-                float pillW = labelW + dpF(getContext(), 14f);
-                float pillLeft = textRight - pillW;
-                float pillTop = headerY + (headerLineH - pillH) * 0.5f;
-                mRect.set(pillLeft, pillTop, textRight, pillTop + pillH);
-                mFillPaint.setColor(withAlpha(mPalette.accentSoftBg, s));
-                canvas.drawRoundRect(mRect, pillH * 0.5f, pillH * 0.5f, mFillPaint);
-
-                mBadgeTextPaint.setColor(withAlpha(mPalette.accent, s));
-                Paint.FontMetrics fm = mBadgeTextPaint.getFontMetrics();
-                float baseline = (pillTop + pillH * 0.5f) - (fm.ascent + fm.descent) * 0.5f;
-                canvas.drawText(AI_SUMMARY_LABEL, pillLeft + (pillW - labelW) * 0.5f, baseline, mBadgeTextPaint);
-
-                // Subtle "3 条" count label beside the pill
                 mCountPaint.setColor(withAlpha(mPalette.textTertiary, s));
                 float cw = mCountPaint.measureText(COUNT_LABEL);
                 Paint.FontMetrics cfm = mCountPaint.getFontMetrics();
-                float cBase = (pillTop + pillH * 0.5f) - (cfm.ascent + cfm.descent) * 0.5f;
-                canvas.drawText(COUNT_LABEL, pillLeft - cw - dpF(getContext(), 6f), cBase, mCountPaint);
+                float cBase = (headerY + headerLineH * 0.5f) - (cfm.ascent + cfm.descent) * 0.5f;
+                canvas.drawText(COUNT_LABEL, textRight - cw, cBase, mCountPaint);
             } else {
                 float timeW = dpF(getContext(), 16f);
                 float timeH = dpF(getContext(), 4f);
@@ -1892,48 +1933,97 @@ final class HyperSettingsUi {
                 canvas.drawRoundRect(mRect, timeH * 0.5f, timeH * 0.5f, mFillPaint);
             }
 
-            // Summary line 1 (transitions from plain raw bar into sparkle-prefixed blue summary bar)
+            // Summary line 1: inline frameless [✦✦ AI 摘要 | ] + subtle Nebula-tinted summary bar
             float sumLineH = dpF(getContext(), 4.8f);
-            float sumLine1Y = lerp(headerY + headerLineH + dpF(getContext(), 5f), top + dpF(getContext(), 37f), s);
-            float sparkleShift = dpF(getContext(), 10f) * s;
+            float sumLine1Y = lerp(headerY + headerLineH + dpF(getContext(), 5f), top + dpF(getContext(), 36f), s);
+            float sumLine1MidY = sumLine1Y + sumLineH * 0.5f;
+            float prefixAdvance = 0f;
+
             if (s > 0.05f) {
-                drawSparkle(
+                float primaryR = dpF(getContext(), 3.6f) * (0.72f + 0.28f * s);
+                float dualW = NebulaSummaryVisuals.drawDualSparkle(
                         canvas,
-                        textLeft + dpF(getContext(), 3.4f),
-                        sumLine1Y + sumLineH * 0.5f,
-                        dpF(getContext(), 3.4f) * (0.6f + 0.4f * s),
-                        withAlpha(mPalette.accent, s));
+                        textLeft,
+                        sumLine1MidY,
+                        primaryR,
+                        mPalette.dark,
+                        s,
+                        mWashBoost,
+                        null,
+                        mFillPaint,
+                        mSparklePath);
+
+                float labelX = textLeft + dualW + dpF(getContext(), 2.6f);
+                float labelW = mBadgeTextPaint.measureText(AI_SUMMARY_LABEL);
+                Paint.FontMetrics fm = mBadgeTextPaint.getFontMetrics();
+                float labelBase = sumLine1MidY - (fm.ascent + fm.descent) * 0.5f;
+
+                LinearGradient labelShader = NebulaSummaryVisuals.createHorizontalBadgeGradient(
+                        labelX, labelX + labelW, mPalette.dark);
+                mBadgeTextPaint.setShader(labelShader);
+                mBadgeTextPaint.setAlpha(NebulaSummaryVisuals.clamp255(Math.round(255f * s)));
+                canvas.drawText(AI_SUMMARY_LABEL, labelX, labelBase, mBadgeTextPaint);
+                mBadgeTextPaint.setShader(null);
+
+                if (mWashBoost > 0.01f) {
+                    float sheenW = Math.max(dpF(getContext(), 18f), labelW * 0.7f);
+                    float sheenLeft = (textLeft - sheenW) + (dualW + labelW + sheenW * 2f) * mWashProgress;
+                    LinearGradient sheen = NebulaSummaryVisuals.createGlintSheenGradient(sheenW, mPalette.dark);
+                    mShaderMatrix.reset();
+                    mShaderMatrix.setTranslate(sheenLeft, 0f);
+                    sheen.setLocalMatrix(mShaderMatrix);
+                    mGlintTextPaint.setShader(sheen);
+                    mGlintTextPaint.setAlpha(NebulaSummaryVisuals.clamp255(Math.round(255f * mWashBoost * s)));
+                    canvas.drawText(AI_SUMMARY_LABEL, labelX, labelBase, mGlintTextPaint);
+                    mGlintTextPaint.setShader(null);
+                }
+
+                // Feather-thin 0.75dp vertical fading Nebula hairline
+                float hx = labelX + labelW + dpF(getContext(), 4.0f);
+                float halfH = dpF(getContext(), 4.2f);
+                mStrokePaint.setStrokeCap(Paint.Cap.ROUND);
+                mStrokePaint.setStrokeWidth(dpF(getContext(), 0.75f));
+                mStrokePaint.setShader(NebulaSummaryVisuals.createHairlineGradient(
+                        sumLine1MidY - halfH, sumLine1MidY + halfH, mPalette.dark));
+                mStrokePaint.setAlpha(NebulaSummaryVisuals.clamp255(Math.round(255f * s)));
+                canvas.drawLine(hx, sumLine1MidY - halfH, hx, sumLine1MidY + halfH, mStrokePaint);
+                mStrokePaint.setShader(null);
+
+                prefixAdvance = (hx - textLeft + dpF(getContext(), 4.4f)) * s;
             }
-            int summaryColor1 = blendColor(
-                    mPalette.previewSkeletonSecondary,
-                    withAlpha(mPalette.accent, mPalette.dark ? 0.78f : 0.62f),
-                    s);
-            mFillPaint.setColor(summaryColor1);
-            float s1Start = textLeft + sparkleShift;
-            float s1End = Math.min(textRight, s1Start + Math.max(0f, textMaxW - sparkleShift) * lerp(0.68f, 0.92f, s));
+
+            int nebulaLine1 = NebulaSummaryVisuals.tintSummaryBodyColor(
+                    mPalette.previewSkeletonPrimary, mPalette.dark);
+            int nebulaLine2 = NebulaSummaryVisuals.tintSummaryBodyColor(
+                    mPalette.previewSkeletonSecondary, mPalette.dark);
+
+            mFillPaint.setShader(null);
+            mFillPaint.setColor(blendColor(mPalette.previewSkeletonSecondary, nebulaLine1, s));
+            float s1Start = textLeft + prefixAdvance;
+            float s1End = Math.min(textRight, s1Start + Math.max(0f, textRight - s1Start) * lerp(0.68f, 0.94f, s));
             mRect.set(s1Start, sumLine1Y, s1End, sumLine1Y + sumLineH);
             canvas.drawRoundRect(mRect, sumLineH * 0.5f, sumLineH * 0.5f, mFillPaint);
 
-            // Summary line 2 (fades in smoothly when card expands into summarized multi-line gist)
+            // Summary line 2 (fades in smoothly aligned to textLeft just like wrapped real TextView)
+            float sumLine2Y = sumLine1Y + sumLineH + dpF(getContext(), 7.5f);
             if (s > 0.05f) {
-                float sumLine2Y = sumLine1Y + sumLineH + dpF(getContext(), 7f);
-                mFillPaint.setColor(withAlpha(mPalette.accent, (mPalette.dark ? 0.46f : 0.36f) * s));
-                mRect.set(s1Start, sumLine2Y, s1Start + Math.max(0f, textMaxW - sparkleShift) * 0.64f, sumLine2Y + sumLineH);
+                mFillPaint.setColor(withAlpha(nebulaLine2, s));
+                mRect.set(textLeft, sumLine2Y, textLeft + textMaxW * 0.72f, sumLine2Y + sumLineH);
                 canvas.drawRoundRect(mRect, sumLineH * 0.5f, sumLineH * 0.5f, mFillPaint);
             }
-        }
 
-        private void drawSparkle(Canvas canvas, float cx, float cy, float r, int color) {
-            float inner = r * 0.28f;
-            mSparklePath.reset();
-            mSparklePath.moveTo(cx, cy - r);
-            mSparklePath.quadTo(cx + inner * 0.4f, cy - inner * 0.4f, cx + r, cy);
-            mSparklePath.quadTo(cx + inner * 0.4f, cy + inner * 0.4f, cx, cy + r);
-            mSparklePath.quadTo(cx - inner * 0.4f, cy + inner * 0.4f, cx - r, cy);
-            mSparklePath.quadTo(cx - inner * 0.4f, cy - inner * 0.4f, cx, cy - r);
-            mSparklePath.close();
-            mFillPaint.setColor(color);
-            canvas.drawPath(mSparklePath, mFillPaint);
+            // One-shot Nebula Wave Wash gliding across the summary lines when toggled ON
+            if (s > 0.10f && mWashBoost > 0.01f) {
+                float zoneTop = sumLine1Y - dpF(getContext(), 6f);
+                float zoneBot = sumLine2Y + sumLineH + dpF(getContext(), 6f);
+                float bandW = Math.max(dpF(getContext(), 44f), textMaxW * 0.38f);
+                float waveX = (textLeft - bandW * 0.35f) + (textMaxW + bandW * 0.7f) * mWashProgress;
+                Shader waveShader = NebulaSummaryVisuals.createFeatheredWaveShader(
+                        bandW, zoneTop, zoneBot, mPalette.dark);
+                NebulaSummaryVisuals.drawTiltedNebulaWave(
+                        canvas, textLeft - dpF(getContext(), 2f), zoneTop, textRight + dpF(getContext(), 2f), zoneBot,
+                        waveX, bandW, mWashBoost * s, mPalette.dark, waveShader, mShaderMatrix, mWavePaint);
+            }
         }
 
         private static float lerp(float a, float b, float t) {
@@ -1943,6 +2033,7 @@ final class HyperSettingsUi {
         @Override
         protected void onDetachedFromWindow() {
             cancelAnimator();
+            cancelWashAnimator();
             super.onDetachedFromWindow();
         }
 
@@ -1952,6 +2043,15 @@ final class HyperSettingsUi {
                 mAnimator = null;
             }
         }
+
+        private void cancelWashAnimator() {
+            if (mWashAnimator != null) {
+                mWashAnimator.cancel();
+                mWashAnimator = null;
+            }
+            mWashProgress = 0f;
+            mWashBoost = 0f;
+        }
     }
 
     /**
@@ -1959,32 +2059,45 @@ final class HyperSettingsUi {
      * amber priority frame pinning important notifications above ordinary cards.
      */
     static final class PriorityPreviewView extends View {
-        private static final float STAGE_HEIGHT_DP = 196f;
+        private static final float STAGE_HEIGHT_DP = 216f;
         private static final float MAX_STAGE_WIDTH_DP = 320f;
         private static final String PRIORITY_LABEL = "重要通知";
+        private static final float[] RIM_STOPS = {0f, 0.24f, 0.48f, 0.72f, 1f};
+        private static final float[] COMET_STOPS = {0f, 0.68f, 0.80f, 0.88f, 0.95f, 1f};
+        private static final float[] AURA_WIDTHS_DP = {5.8f, 3.0f};
+        private static final float[] AURA_ALPHAS_DARK = {0.060f, 0.115f};
+        private static final float[] AURA_ALPHAS_LIGHT = {0.048f, 0.092f};
 
         private final Palette mPalette;
         private final Paint mFillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint mStrokePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint mAuraPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint mTextPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Path mStagePath = new Path();
-        private final Path mFramePath = new Path();
+        private final Path mFieldPath = new Path();
         private final Path mCardPath = new Path();
         private final Path mIconPath = new Path();
         private final Path mSparklePath = new Path();
         private final RectF mRect = new RectF();
+        private final Matrix mShaderMatrix = new Matrix();
 
         private boolean mPriorityEnabled;
         private float mProgress;
+        private float mShimmerProgress;
+        private float mShimmerBoost;
         private ValueAnimator mAnimator;
+        private ValueAnimator mShimmerAnimator;
 
         PriorityPreviewView(Context context, Palette palette) {
             super(context);
             mPalette = palette;
             mFillPaint.setStyle(Paint.Style.FILL);
             mStrokePaint.setStyle(Paint.Style.STROKE);
+            mStrokePaint.setStrokeJoin(Paint.Join.ROUND);
+            mAuraPaint.setStyle(Paint.Style.STROKE);
+            mAuraPaint.setStrokeJoin(Paint.Join.ROUND);
             mTextPaint.setTypeface(typeface(500));
-            mTextPaint.setTextSize(dpF(context, 10.5f));
+            mTextPaint.setTextSize(dpF(context, 9.4f));
             setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
         }
 
@@ -1994,6 +2107,7 @@ final class HyperSettingsUi {
             float target = enabled ? 1f : 0f;
             if (!animate || !ValueAnimator.areAnimatorsEnabled() || !isAttachedToWindow()) {
                 cancelAnimator();
+                cancelShimmerAnimator();
                 mProgress = target;
                 invalidate();
                 return;
@@ -2003,6 +2117,9 @@ final class HyperSettingsUi {
                 return;
             }
             cancelAnimator();
+            if (!enabled) {
+                cancelShimmerAnimator();
+            }
             mAnimator = ValueAnimator.ofFloat(mProgress, target);
             mAnimator.setDuration(280L);
             mAnimator.setInterpolator(HYPER_EASE);
@@ -2011,6 +2128,38 @@ final class HyperSettingsUi {
                 invalidate();
             });
             mAnimator.start();
+            if (enabled && changed) {
+                startPreviewShimmer();
+            }
+        }
+
+        private void startPreviewShimmer() {
+            if (!ValueAnimator.areAnimatorsEnabled() || !isAttachedToWindow()) return;
+            cancelShimmerAnimator();
+            mShimmerAnimator = ValueAnimator.ofFloat(0f, 1f);
+            mShimmerAnimator.setDuration(1250L);
+            mShimmerAnimator.setInterpolator(HYPER_EASE);
+            mShimmerAnimator.addUpdateListener(anim -> {
+                mShimmerProgress = (float) anim.getAnimatedValue();
+                mShimmerBoost = shimmerEnvelope(mShimmerProgress);
+                invalidate();
+            });
+            mShimmerAnimator.addListener(new AnimatorListenerAdapter() {
+                @Override
+                public void onAnimationEnd(Animator animation) {
+                    mShimmerProgress = 0f;
+                    mShimmerBoost = 0f;
+                    mShimmerAnimator = null;
+                    invalidate();
+                }
+            });
+            mShimmerAnimator.start();
+        }
+
+        private static float shimmerEnvelope(float t) {
+            if (t <= 0f || t >= 1f) return 0f;
+            float u = t < 0.24f ? (t / 0.24f) : ((1f - t) / 0.76f);
+            return u * u * (3f - 2f * u);
         }
 
         @Override
@@ -2031,18 +2180,17 @@ final class HyperSettingsUi {
             float p = mProgress;
             float stageW = Math.min(totalW, dpF(getContext(), MAX_STAGE_WIDTH_DP));
             float stageLeft = (totalW - stageW) * 0.5f;
-            float stageTop = 0f;
             float stageRight = stageLeft + stageW;
-            float stageBottom = totalH;
 
             // Inner soft HyperOS schematic stage
             float stageRadius = dpF(getContext(), 14f);
             float strokeHalf = dpF(getContext(), 0.5f);
-            mRect.set(stageLeft + strokeHalf, stageTop + strokeHalf,
-                    stageRight - strokeHalf, stageBottom - strokeHalf);
+            mRect.set(stageLeft + strokeHalf, strokeHalf, stageRight - strokeHalf, totalH - strokeHalf);
             buildSquirclePath(mRect, stageRadius, mStagePath);
+            mFillPaint.setShader(null);
             mFillPaint.setColor(mPalette.previewStageBg);
             canvas.drawPath(mStagePath, mFillPaint);
+            mStrokePaint.setShader(null);
             mStrokePaint.setColor(mPalette.previewStageBorder);
             mStrokePaint.setStrokeWidth(dpF(getContext(), 1f));
             canvas.drawPath(mStagePath, mStrokePaint);
@@ -2050,110 +2198,377 @@ final class HyperSettingsUi {
             float outerPadH = dpF(getContext(), 14f);
             float normalLeft = stageLeft + outerPadH;
             float normalRight = stageRight - outerPadH;
-            float cardH = dpF(getContext(), 40f);
-            float cardGap = dpF(getContext(), 9f);
+            float cardH = dpF(getContext(), 37f);
+            float normalGap = dpF(getContext(), 9f);
+            float priorityGap = dpF(getContext(), 6.5f);
             float cardRadius = dpF(getContext(), 11f);
 
-            float offTotalH = cardH * 3f + cardGap * 2f;
+            float offTotalH = cardH * 3f + normalGap * 2f;
             float offStartY = (totalH - offTotalH) * 0.5f;
 
-            float framePadH = dpF(getContext(), 8f);
-            float frameHeaderH = dpF(getContext(), 22f);
-            float framePadBottom = dpF(getContext(), 8f);
-            float frameH = frameHeaderH + cardH + framePadBottom;
-            float onSectionGap = dpF(getContext(), 11f);
-            float onTotalH = frameH + onSectionGap + cardH * 2f + cardGap;
-            float onStartY = Math.max(dpF(getContext(), 10f), (totalH - onTotalH) * 0.5f);
+            // ON layout: Ambient Nebula Glass Field holding micro-capsule + 2 linked priority cards,
+            // plus 1 ordinary notification clearly outside the glass field below.
+            float fieldPadH = dpF(getContext(), 7f);
+            float fieldPadTop = dpF(getContext(), 6.5f);
+            float capsuleH = dpF(getContext(), 17.5f);
+            float capsuleGap = dpF(getContext(), 6f);
+            float fieldPadBot = dpF(getContext(), 7f);
+            float fieldH = fieldPadTop + capsuleH + capsuleGap + cardH * 2f + priorityGap + fieldPadBot;
+            float sectionGap = dpF(getContext(), 13f);
+            float onTotalH = fieldH + sectionGap + cardH;
+            float onStartY = Math.max(dpF(getContext(), 9f), (totalH - onTotalH) * 0.5f);
 
-            // 1. Priority outer amber frame
-            if (p > 0.01f) {
-                float frameTop = lerp(offStartY - dpF(getContext(), 6f), onStartY, p);
-                float frameBottom = frameTop + frameH;
-                mRect.set(normalLeft, frameTop, normalRight, frameBottom);
-                buildSquirclePath(mRect, dpF(getContext(), 14f), mFramePath);
+            float cardInset = fieldPadH * p;
+            float pCardLeft = normalLeft + cardInset;
+            float pCardRight = normalRight - cardInset;
 
-                mFillPaint.setColor(withAlpha(mPalette.previewPriorityOuterFill, p));
-                canvas.drawPath(mFramePath, mFillPaint);
+            // 1. Sheer Nebula Ambient Glass Field (concentric squircle mist + 0.7dp specular hairline)
+            if (p > 0.02f) {
+                float fieldTop = lerp(offStartY - dpF(getContext(), 6f), onStartY, p);
+                float fieldBot = fieldTop + fieldH;
+                drawAmbientGlassField(canvas, normalLeft, fieldTop, normalRight, fieldBot,
+                        cardRadius + fieldPadH, p);
 
-                mStrokePaint.setColor(withAlpha(mPalette.previewPriorityOuterStroke, p));
-                mStrokePaint.setStrokeWidth(dpF(getContext(), 1.25f));
-                canvas.drawPath(mFramePath, mStrokePaint);
-
-                float sparkleCx = normalLeft + framePadH + dpF(getContext(), 5f);
-                float sparkleCy = frameTop + frameHeaderH * 0.54f;
-                float sparkleR = dpF(getContext(), 4.2f);
-                drawSparkle(canvas, sparkleCx, sparkleCy, sparkleR,
-                        withAlpha(mPalette.previewPriorityIconGlyph, p));
-
-                mTextPaint.setColor(withAlpha(mPalette.previewPriorityBadgeText, p));
-                Paint.FontMetrics fm = mTextPaint.getFontMetrics();
-                float textBaseline = sparkleCy - (fm.ascent + fm.descent) * 0.5f;
-                canvas.drawText(
-                        PRIORITY_LABEL,
-                        sparkleCx + sparkleR + dpF(getContext(), 4.5f),
-                        textBaseline,
-                        mTextPaint);
+                // Top-left Liquid Glass micro-capsule inside the chamber
+                drawMicroCapsule(canvas, pCardLeft + dpF(getContext(), 1f),
+                        fieldTop + fieldPadTop, capsuleH, p);
             }
 
-            // 2. First notification card (Priority card)
-            float topCardInset = framePadH * p;
-            float topCardLeft = normalLeft + topCardInset;
-            float topCardRight = normalRight - topCardInset;
-            float topCardY = lerp(offStartY, onStartY + frameHeaderH, p);
-            int topCardFill = blendColor(mPalette.previewNormalCard, mPalette.previewPriorityCard, p);
-            int topIconBg = blendColor(mPalette.previewNormalIcon, mPalette.previewPriorityIconBg, p);
-            int topLine1 = blendColor(mPalette.previewSkeletonPrimary, mPalette.previewPriorityLinePrimary, p);
-            int topLine2 = blendColor(mPalette.previewSkeletonSecondary, mPalette.previewPriorityLineSecondary, p);
-            drawNotificationCard(
-                    canvas,
-                    topCardLeft, topCardY, topCardRight, topCardY + cardH,
-                    cardRadius,
-                    topCardFill, topIconBg,
-                    p > 0.05f ? withAlpha(mPalette.previewPriorityIconGlyph, p) : 0,
-                    topLine1, topLine2,
-                    0.46f, 0.76f,
-                    1.0f);
-
-            // 3. Second notification card (normal)
+            // 2. Priority Card 1 (linked inside Nebula Ambient Glass Field)
+            float card1Y = lerp(offStartY, onStartY + fieldPadTop + capsuleH + capsuleGap, p);
             float card2Y = lerp(
-                    offStartY + cardH + cardGap,
-                    onStartY + frameH + onSectionGap,
+                    offStartY + cardH + normalGap,
+                    onStartY + fieldPadTop + capsuleH + capsuleGap + cardH + priorityGap,
                     p);
-            drawNotificationCard(
-                    canvas,
-                    normalLeft, card2Y, normalRight, card2Y + cardH,
-                    cardRadius,
-                    mPalette.previewNormalCard, mPalette.previewNormalIcon,
-                    0,
-                    mPalette.previewSkeletonPrimary, mPalette.previewSkeletonSecondary,
-                    0.38f, 0.68f,
-                    lerp(1.0f, 0.92f, p));
 
-            // 4. Third notification card (normal)
+            // Soft Nebula mist bridge flowing across the gap between Card 1 and Card 2
+            if (p > 0.05f) {
+                float bridgeL = pCardLeft + dpF(getContext(), 14f);
+                float bridgeR = pCardRight - dpF(getContext(), 14f);
+                float bridgeTop = card1Y + cardH - dpF(getContext(), 1f);
+                float bridgeBot = card2Y + dpF(getContext(), 1f);
+                mFillPaint.setAlpha(255);
+                mFillPaint.setShader(new LinearGradient(
+                        bridgeL, 0f, bridgeR, 0f,
+                        new int[]{
+                                0x00000000,
+                                withAlpha(mPalette.previewNebulaCyan, (mPalette.dark ? 0.16f : 0.12f) * p),
+                                withAlpha(mPalette.previewNebulaViolet, (mPalette.dark ? 0.16f : 0.12f) * p),
+                                0x00000000
+                        },
+                        new float[]{0f, 0.28f, 0.72f, 1f},
+                        Shader.TileMode.CLAMP));
+                canvas.drawRect(bridgeL, bridgeTop, bridgeR, bridgeBot, mFillPaint);
+                mFillPaint.setShader(null);
+            }
+
+            int pCardFill = blendColor(mPalette.previewNormalCard, mPalette.previewNebulaCard, p);
+            int pIconBg = blendColor(mPalette.previewNormalIcon, mPalette.previewNebulaIconBg, p);
+            int pLine1 = blendColor(mPalette.previewSkeletonPrimary, mPalette.previewNebulaLinePrimary, p);
+            int pLine2 = blendColor(mPalette.previewSkeletonSecondary, mPalette.previewNebulaLineSecondary, p);
+
+            drawPriorityCard(
+                    canvas,
+                    pCardLeft, card1Y, pCardRight, card1Y + cardH,
+                    cardRadius,
+                    pCardFill, pIconBg, pLine1, pLine2,
+                    0.48f, 0.78f,
+                    p, 0f);
+
+            // 3. Priority Card 2 (second linked priority card inside the same glass chamber)
+            drawPriorityCard(
+                    canvas,
+                    pCardLeft, card2Y, pCardRight, card2Y + cardH,
+                    cardRadius,
+                    pCardFill, pIconBg, pLine1, pLine2,
+                    0.40f, 0.68f,
+                    p, 26f);
+
+            // 4. Subtle fading Nebula hairline below the ambient glass field
             float card3Y = lerp(
-                    offStartY + (cardH + cardGap) * 2f,
-                    onStartY + frameH + onSectionGap + cardH + cardGap,
+                    offStartY + (cardH + normalGap) * 2f,
+                    onStartY + fieldH + sectionGap,
                     p);
-            drawNotificationCard(
+            if (p > 0.04f) {
+                float divY = (onStartY + fieldH + card3Y) * 0.5f;
+                float divInset = dpF(getContext(), 18f);
+                float dl = normalLeft + divInset;
+                float dr = normalRight - divInset;
+                mStrokePaint.setAlpha(255);
+                mStrokePaint.setStrokeCap(Paint.Cap.ROUND);
+                mStrokePaint.setStrokeWidth(dpF(getContext(), 0.75f));
+                mStrokePaint.setShader(new LinearGradient(
+                        dl, divY, dr, divY,
+                        new int[]{
+                                0x00000000,
+                                withAlpha(mPalette.previewNebulaCyan, (mPalette.dark ? 0.36f : 0.30f) * p),
+                                withAlpha(mPalette.dark ? mPalette.previewNebulaMoon : mPalette.previewNebulaViolet,
+                                        (mPalette.dark ? 0.48f : 0.40f) * p),
+                                withAlpha(mPalette.previewNebulaViolet, (mPalette.dark ? 0.34f : 0.28f) * p),
+                                0x00000000
+                        },
+                        new float[]{0f, 0.22f, 0.50f, 0.78f, 1f},
+                        Shader.TileMode.CLAMP));
+                canvas.drawLine(dl, divY, dr, divY, mStrokePaint);
+                mStrokePaint.setShader(null);
+            }
+
+            // 5. Third notification card (ordinary notification clearly outside the glass field)
+            drawNormalCard(
                     canvas,
                     normalLeft, card3Y, normalRight, card3Y + cardH,
                     cardRadius,
-                    mPalette.previewNormalCard, mPalette.previewNormalIcon,
-                    0,
-                    mPalette.previewSkeletonPrimary, mPalette.previewSkeletonSecondary,
-                    0.32f, 0.56f,
-                    lerp(1.0f, 0.65f, p));
+                    0.34f, 0.58f,
+                    lerp(1.0f, 0.76f, p));
         }
 
-        private void drawNotificationCard(
+        private void drawAmbientGlassField(
+                Canvas canvas,
+                float left, float top, float right, float bottom,
+                float radius,
+                float p) {
+            mRect.set(left, top, right, bottom);
+            buildSquirclePath(mRect, radius, mFieldPath);
+            float cx = mRect.centerX();
+            float cy = mRect.centerY();
+
+            // Sheer diagonal Nebula glass mist fill
+            mFillPaint.setAlpha(255);
+            mFillPaint.setShader(new LinearGradient(
+                    left, top, right, bottom,
+                    new int[]{
+                            withAlpha(mPalette.previewNebulaCyan, (mPalette.dark ? 0.14f : 0.11f) * p),
+                            withAlpha(mPalette.previewNebulaAzure, (mPalette.dark ? 0.10f : 0.08f) * p),
+                            withAlpha(mPalette.previewNebulaViolet, (mPalette.dark ? 0.15f : 0.12f) * p)
+                    },
+                    new float[]{0f, 0.48f, 1f},
+                    Shader.TileMode.CLAMP));
+            canvas.drawPath(mFieldPath, mFillPaint);
+
+            // Soft top liquid-glass sheen
+            mFillPaint.setAlpha(255);
+            mFillPaint.setShader(new LinearGradient(
+                    0f, top, 0f, top + (bottom - top) * 0.32f,
+                    withAlpha(0xFFFFFFFF, (mPalette.dark ? 0.08f : 0.38f) * p),
+                    0x00FFFFFF,
+                    Shader.TileMode.CLAMP));
+            canvas.drawPath(mFieldPath, mFillPaint);
+            mFillPaint.setShader(null);
+
+            // Feather-thin 0.75dp specular glass hairline outline
+            SweepGradient rim = new SweepGradient(cx, cy,
+                    new int[]{
+                            withAlpha(mPalette.previewNebulaMoon, (mPalette.dark ? 0.48f : 0.52f) * p),
+                            withAlpha(mPalette.previewNebulaCyan, (mPalette.dark ? 0.44f : 0.44f) * p),
+                            withAlpha(mPalette.previewNebulaAzure, (mPalette.dark ? 0.34f : 0.38f) * p),
+                            withAlpha(mPalette.previewNebulaViolet, (mPalette.dark ? 0.42f : 0.44f) * p),
+                            withAlpha(mPalette.previewNebulaMoon, (mPalette.dark ? 0.48f : 0.52f) * p)
+                    }, RIM_STOPS);
+            mShaderMatrix.reset();
+            mShaderMatrix.setRotate(-32f + mShimmerProgress * 360f, cx, cy);
+            rim.setLocalMatrix(mShaderMatrix);
+            mStrokePaint.setAlpha(255);
+            mStrokePaint.setShader(rim);
+            mStrokePaint.setStrokeWidth(dpF(getContext(), 0.75f + 0.25f * mShimmerBoost));
+            canvas.drawPath(mFieldPath, mStrokePaint);
+            mStrokePaint.setShader(null);
+        }
+
+        private void drawMicroCapsule(Canvas canvas, float left, float top, float height, float p) {
+            float sparkleR = dpF(getContext(), 3.4f);
+            float padStart = dpF(getContext(), 6.5f);
+            float padEnd = dpF(getContext(), 8f);
+            float gap = dpF(getContext(), 3.8f);
+            float textW = mTextPaint.measureText(PRIORITY_LABEL);
+            float pillW = padStart + sparkleR * 2f + gap + textW + padEnd;
+            float r = height * 0.5f;
+
+            mRect.set(left, top, left + pillW, top + height);
+            mFillPaint.setShader(null);
+            if (!mPalette.dark) {
+                mFillPaint.setColor(withAlpha(0x10142342, p));
+                canvas.save();
+                canvas.translate(0f, dpF(getContext(), 0.55f));
+                canvas.drawRoundRect(mRect, r, r, mFillPaint);
+                canvas.restore();
+            }
+            mFillPaint.setColor(withAlpha(mPalette.previewNebulaCapsuleFill, p));
+            canvas.drawRoundRect(mRect, r, r, mFillPaint);
+
+            float cx = mRect.centerX();
+            float cy = mRect.centerY();
+            SweepGradient rim = new SweepGradient(cx, cy,
+                    new int[]{
+                            withAlpha(mPalette.previewNebulaCyan, (0.58f + 0.35f * mShimmerBoost) * p),
+                            withAlpha(mPalette.previewNebulaAzure, (0.52f + 0.35f * mShimmerBoost) * p),
+                            withAlpha(mPalette.previewNebulaViolet, (0.58f + 0.35f * mShimmerBoost) * p),
+                            withAlpha(mPalette.previewNebulaMoon, (0.72f + 0.25f * mShimmerBoost) * p),
+                            withAlpha(mPalette.previewNebulaCyan, (0.58f + 0.35f * mShimmerBoost) * p)
+                    }, RIM_STOPS);
+            mShaderMatrix.reset();
+            mShaderMatrix.setRotate(-30f + mShimmerProgress * 360f, cx, cy);
+            rim.setLocalMatrix(mShaderMatrix);
+            mStrokePaint.setAlpha(255);
+            mStrokePaint.setShader(rim);
+            mStrokePaint.setStrokeWidth(dpF(getContext(), 0.7f + 0.22f * mShimmerBoost));
+            canvas.drawRoundRect(mRect, r, r, mStrokePaint);
+            mStrokePaint.setShader(null);
+
+            float sparkleCx = left + padStart + sparkleR;
+            drawGradientSparkle(canvas, sparkleCx, cy, sparkleR, p, mShimmerBoost);
+
+            mTextPaint.setColor(withAlpha(mPalette.previewNebulaBadgeText, p));
+            Paint.FontMetrics fm = mTextPaint.getFontMetrics();
+            float baseline = cy - (fm.ascent + fm.descent) * 0.5f;
+            canvas.drawText(PRIORITY_LABEL, sparkleCx + sparkleR + gap, baseline, mTextPaint);
+        }
+
+        private void drawPriorityCard(
                 Canvas canvas,
                 float left, float top, float right, float bottom,
                 float radius,
                 int cardBg,
                 int iconBg,
-                int iconGlyphColor,
                 int linePrimaryColor,
                 int lineSecondaryColor,
+                float line1Ratio,
+                float line2Ratio,
+                float p,
+                float angleOffset) {
+            float cardH = bottom - top;
+            mRect.set(left, top, right, bottom);
+            buildSquirclePath(mRect, radius, mCardPath);
+            float cx = mRect.centerX();
+            float cy = mRect.centerY();
+
+            // 1. Tight outward-clipped feathered Nebula Aurora glow
+            if (p > 0.03f) {
+                SweepGradient aura = new SweepGradient(cx, cy,
+                        new int[]{
+                                mPalette.previewNebulaCyan,
+                                mPalette.previewNebulaAzure,
+                                mPalette.previewNebulaViolet,
+                                mPalette.previewNebulaMoon,
+                                mPalette.previewNebulaCyan
+                        }, RIM_STOPS);
+                mShaderMatrix.reset();
+                mShaderMatrix.setRotate(-32f + angleOffset + mShimmerProgress * 360f, cx, cy);
+                aura.setLocalMatrix(mShaderMatrix);
+                mAuraPaint.setShader(aura);
+
+                float[] alphas = mPalette.dark ? AURA_ALPHAS_DARK : AURA_ALPHAS_LIGHT;
+                int saved = canvas.save();
+                canvas.clipOutPath(mCardPath);
+                for (int i = 0; i < AURA_WIDTHS_DP.length; i++) {
+                    float a = alphas[i] * (1f + 0.75f * mShimmerBoost) * p;
+                    mAuraPaint.setStrokeWidth(dpF(getContext(), AURA_WIDTHS_DP[i]));
+                    mAuraPaint.setAlpha(Math.min(255, Math.round(a * 255f)));
+                    canvas.drawPath(mCardPath, mAuraPaint);
+                }
+                canvas.restoreToCount(saved);
+                mAuraPaint.setShader(null);
+            }
+
+            // 2. Crisp card surface
+            mFillPaint.setShader(null);
+            if (!mPalette.dark) {
+                mFillPaint.setColor(0x0B000000);
+                canvas.save();
+                canvas.translate(0f, dpF(getContext(), 0.7f));
+                canvas.drawPath(mCardPath, mFillPaint);
+                canvas.restore();
+            }
+            mFillPaint.setColor(cardBg);
+            canvas.drawPath(mCardPath, mFillPaint);
+
+            // 3. Per-card squircle Nebula Aurora prism rim + optional shimmer comet
+            if (p > 0.03f) {
+                SweepGradient rim = new SweepGradient(cx, cy,
+                        new int[]{
+                                withAlpha(mPalette.previewNebulaCyan, 0.90f * p),
+                                withAlpha(mPalette.previewNebulaAzure, 0.86f * p),
+                                withAlpha(mPalette.previewNebulaViolet, 0.90f * p),
+                                withAlpha(mPalette.previewNebulaMoon, (mPalette.dark ? 0.92f : 0.75f) * p),
+                                withAlpha(mPalette.previewNebulaCyan, 0.90f * p)
+                        }, RIM_STOPS);
+                mShaderMatrix.reset();
+                mShaderMatrix.setRotate(-32f + angleOffset + mShimmerProgress * 360f, cx, cy);
+                rim.setLocalMatrix(mShaderMatrix);
+                mStrokePaint.setAlpha(255);
+                mStrokePaint.setShader(rim);
+                mStrokePaint.setStrokeWidth(dpF(getContext(), 1.2f));
+                canvas.drawPath(mCardPath, mStrokePaint);
+
+                if (mShimmerBoost > 0.01f) {
+                    SweepGradient comet = new SweepGradient(cx, cy,
+                            new int[]{
+                                    0x00000000,
+                                    0x00000000,
+                                    withAlpha(mPalette.previewNebulaCyan, 0.75f * mShimmerBoost * p),
+                                    withAlpha(0xFFFFFFFF, 0.95f * mShimmerBoost * p),
+                                    withAlpha(mPalette.previewNebulaViolet, 0.70f * mShimmerBoost * p),
+                                    0x00000000
+                            }, COMET_STOPS);
+                    mShaderMatrix.reset();
+                    mShaderMatrix.setRotate(-115f + angleOffset + mShimmerProgress * 360f, cx, cy);
+                    comet.setLocalMatrix(mShaderMatrix);
+                    mStrokePaint.setAlpha(255);
+                    mStrokePaint.setShader(comet);
+                    mStrokePaint.setStrokeWidth(dpF(getContext(), 1.5f));
+                    canvas.drawPath(mCardPath, mStrokePaint);
+                }
+                mStrokePaint.setShader(null);
+            }
+
+            // 4. Card contents
+            float iconSize = dpF(getContext(), 21f);
+            float iconLeft = left + dpF(getContext(), 10f);
+            float iconTop = top + (cardH - iconSize) * 0.5f;
+            mRect.set(iconLeft, iconTop, iconLeft + iconSize, iconTop + iconSize);
+            buildSquirclePath(mRect, dpF(getContext(), 6.5f), mIconPath);
+            mFillPaint.setColor(iconBg);
+            canvas.drawPath(mIconPath, mFillPaint);
+
+            if (p > 0.05f) {
+                drawGradientSparkle(
+                        canvas,
+                        iconLeft + iconSize * 0.5f,
+                        iconTop + iconSize * 0.5f,
+                        dpF(getContext(), 4.5f),
+                        p,
+                        mShimmerBoost * 0.6f);
+            }
+
+            float textLeft = iconLeft + iconSize + dpF(getContext(), 9f);
+            float textMaxW = Math.max(0f, right - dpF(getContext(), 12f) - textLeft);
+            float line1H = dpF(getContext(), 5.2f);
+            float line2H = dpF(getContext(), 4.2f);
+            float lineGap = dpF(getContext(), 5.2f);
+            float linesTop = top + (cardH - (line1H + lineGap + line2H)) * 0.5f;
+
+            mFillPaint.setShader(null);
+            mFillPaint.setColor(linePrimaryColor);
+            mRect.set(textLeft, linesTop, textLeft + textMaxW * line1Ratio, linesTop + line1H);
+            canvas.drawRoundRect(mRect, line1H * 0.5f, line1H * 0.5f, mFillPaint);
+
+            float timeW = dpF(getContext(), 15f);
+            float timeH = dpF(getContext(), 3.8f);
+            float timeTop = linesTop + (line1H - timeH) * 0.5f;
+            mFillPaint.setColor(withAlpha(lineSecondaryColor, 0.85f));
+            mRect.set(right - dpF(getContext(), 12f) - timeW, timeTop,
+                    right - dpF(getContext(), 12f), timeTop + timeH);
+            canvas.drawRoundRect(mRect, timeH * 0.5f, timeH * 0.5f, mFillPaint);
+
+            mFillPaint.setColor(lineSecondaryColor);
+            float line2Top = linesTop + line1H + lineGap;
+            mRect.set(textLeft, line2Top, textLeft + textMaxW * line2Ratio, line2Top + line2H);
+            canvas.drawRoundRect(mRect, line2H * 0.5f, line2H * 0.5f, mFillPaint);
+        }
+
+        private void drawNormalCard(
+                Canvas canvas,
+                float left, float top, float right, float bottom,
+                float radius,
                 float line1Ratio,
                 float line2Ratio,
                 float alphaScale) {
@@ -2161,70 +2576,74 @@ final class HyperSettingsUi {
             mRect.set(left, top, right, bottom);
             buildSquirclePath(mRect, radius, mCardPath);
 
+            mFillPaint.setShader(null);
             if (!mPalette.dark) {
                 mFillPaint.setColor(withAlpha(0x0A000000, alphaScale));
                 canvas.save();
-                canvas.translate(0f, dpF(getContext(), 0.75f));
+                canvas.translate(0f, dpF(getContext(), 0.7f));
                 canvas.drawPath(mCardPath, mFillPaint);
                 canvas.restore();
             }
 
-            mFillPaint.setColor(withAlpha(cardBg, alphaScale));
+            mFillPaint.setColor(withAlpha(mPalette.previewNormalCard, alphaScale));
             canvas.drawPath(mCardPath, mFillPaint);
 
-            float iconSize = dpF(getContext(), 22f);
+            float iconSize = dpF(getContext(), 21f);
             float iconLeft = left + dpF(getContext(), 10f);
             float iconTop = top + (cardH - iconSize) * 0.5f;
             mRect.set(iconLeft, iconTop, iconLeft + iconSize, iconTop + iconSize);
             buildSquirclePath(mRect, dpF(getContext(), 6.5f), mIconPath);
-            mFillPaint.setColor(withAlpha(iconBg, alphaScale));
+            mFillPaint.setColor(withAlpha(mPalette.previewNormalIcon, alphaScale));
             canvas.drawPath(mIconPath, mFillPaint);
-
-            if (iconGlyphColor != 0) {
-                drawSparkle(
-                        canvas,
-                        iconLeft + iconSize * 0.5f,
-                        iconTop + iconSize * 0.5f,
-                        dpF(getContext(), 4.5f),
-                        withAlpha(iconGlyphColor, alphaScale));
-            }
 
             float textLeft = iconLeft + iconSize + dpF(getContext(), 9f);
             float textMaxW = Math.max(0f, right - dpF(getContext(), 12f) - textLeft);
-            float line1H = dpF(getContext(), 5.5f);
-            float line2H = dpF(getContext(), 4.5f);
-            float lineGap = dpF(getContext(), 5.5f);
+            float line1H = dpF(getContext(), 5.2f);
+            float line2H = dpF(getContext(), 4.2f);
+            float lineGap = dpF(getContext(), 5.2f);
             float linesTop = top + (cardH - (line1H + lineGap + line2H)) * 0.5f;
 
-            mFillPaint.setColor(withAlpha(linePrimaryColor, alphaScale));
+            mFillPaint.setColor(withAlpha(mPalette.previewSkeletonPrimary, alphaScale));
             mRect.set(textLeft, linesTop, textLeft + textMaxW * line1Ratio, linesTop + line1H);
             canvas.drawRoundRect(mRect, line1H * 0.5f, line1H * 0.5f, mFillPaint);
 
-            float timeW = dpF(getContext(), 16f);
-            float timeH = dpF(getContext(), 4f);
+            float timeW = dpF(getContext(), 15f);
+            float timeH = dpF(getContext(), 3.8f);
             float timeTop = linesTop + (line1H - timeH) * 0.5f;
-            mFillPaint.setColor(withAlpha(lineSecondaryColor, alphaScale * 0.85f));
+            mFillPaint.setColor(withAlpha(mPalette.previewSkeletonSecondary, alphaScale * 0.85f));
             mRect.set(right - dpF(getContext(), 12f) - timeW, timeTop,
                     right - dpF(getContext(), 12f), timeTop + timeH);
             canvas.drawRoundRect(mRect, timeH * 0.5f, timeH * 0.5f, mFillPaint);
 
-            mFillPaint.setColor(withAlpha(lineSecondaryColor, alphaScale));
+            mFillPaint.setColor(withAlpha(mPalette.previewSkeletonSecondary, alphaScale));
             float line2Top = linesTop + line1H + lineGap;
             mRect.set(textLeft, line2Top, textLeft + textMaxW * line2Ratio, line2Top + line2H);
             canvas.drawRoundRect(mRect, line2H * 0.5f, line2H * 0.5f, mFillPaint);
         }
 
-        private void drawSparkle(Canvas canvas, float cx, float cy, float r, int color) {
-            float inner = r * 0.28f;
+        private void drawGradientSparkle(Canvas canvas, float cx, float cy, float r,
+                                         float alphaScale, float glowBoost) {
+            float inner = r * 0.25f;
             mSparklePath.reset();
             mSparklePath.moveTo(cx, cy - r);
-            mSparklePath.quadTo(cx + inner * 0.4f, cy - inner * 0.4f, cx + r, cy);
-            mSparklePath.quadTo(cx + inner * 0.4f, cy + inner * 0.4f, cx, cy + r);
-            mSparklePath.quadTo(cx - inner * 0.4f, cy + inner * 0.4f, cx - r, cy);
-            mSparklePath.quadTo(cx - inner * 0.4f, cy - inner * 0.4f, cx, cy - r);
+            mSparklePath.quadTo(cx + inner * 0.42f, cy - inner * 0.42f, cx + r, cy);
+            mSparklePath.quadTo(cx + inner * 0.42f, cy + inner * 0.42f, cx, cy + r);
+            mSparklePath.quadTo(cx - inner * 0.42f, cy + inner * 0.42f, cx - r, cy);
+            mSparklePath.quadTo(cx - inner * 0.42f, cy - inner * 0.42f, cx, cy - r);
             mSparklePath.close();
-            mFillPaint.setColor(color);
+
+            mFillPaint.setAlpha(255);
+            mFillPaint.setShader(new LinearGradient(
+                    cx - r, cy - r, cx + r, cy + r,
+                    withAlpha(mPalette.previewNebulaCyan, alphaScale),
+                    withAlpha(mPalette.previewNebulaViolet, alphaScale),
+                    Shader.TileMode.CLAMP));
             canvas.drawPath(mSparklePath, mFillPaint);
+            mFillPaint.setShader(null);
+            if (glowBoost > 0.02f) {
+                mFillPaint.setColor(withAlpha(0xFFFFFFFF, 0.58f * glowBoost * alphaScale));
+                canvas.drawPath(mSparklePath, mFillPaint);
+            }
         }
 
         private static float lerp(float a, float b, float t) {
@@ -2234,6 +2653,7 @@ final class HyperSettingsUi {
         @Override
         protected void onDetachedFromWindow() {
             cancelAnimator();
+            cancelShimmerAnimator();
             super.onDetachedFromWindow();
         }
 
@@ -2243,13 +2663,22 @@ final class HyperSettingsUi {
                 mAnimator = null;
             }
         }
+
+        private void cancelShimmerAnimator() {
+            if (mShimmerAnimator != null) {
+                mShimmerAnimator.cancel();
+                mShimmerAnimator = null;
+            }
+            mShimmerProgress = 0f;
+            mShimmerBoost = 0f;
+        }
     }
 
     /**
      * Dedicated HyperOS settings illustration for "减少干扰" (Reduce Interruptions):
-     * when enabled, displays the custom "星芒叠层" focus pill, highlights the VIP notification
-     * breaking through with alerts, and softly dims ordinary notifications while keeping them
-     * visible in the notification list.
+     * when enabled, displays the Apple Intelligence style iridescent 7-lobe focus pill,
+     * highlights the VIP notification breaking through with alerts, and softly dims ordinary
+     * notifications while keeping them visible in the notification list.
      */
     static final class ReducePreviewView extends View {
         private static final float STAGE_HEIGHT_DP = 178f;
@@ -2258,8 +2687,10 @@ final class HyperSettingsUi {
         private static final String ALLOW_LABEL = "放行提醒";
 
         private final Palette mPalette;
+        private final ReduceInterruptions.AppleIntelIridescentPainter mAppleIconPainter;
         private final Paint mFillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint mStrokePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint mPillBorderPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint mPillTextPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint mBadgeTextPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Path mStagePath = new Path();
@@ -2268,15 +2699,24 @@ final class HyperSettingsUi {
         private final Path mSparklePath = new Path();
         private final RectF mRect = new RectF();
 
+        private LinearGradient mPillBorderShader;
+        private float mPillGradLeft = Float.NaN;
+        private float mPillGradRight = Float.NaN;
+
         private boolean mReduceEnabled;
         private float mProgress;
+        private float mShimmerPhaseDeg;
         private ValueAnimator mAnimator;
+        private ValueAnimator mShimmerAnimator;
 
         ReducePreviewView(Context context, Palette palette) {
             super(context);
             mPalette = palette;
+            mAppleIconPainter = new ReduceInterruptions.AppleIntelIridescentPainter(palette.dark);
             mFillPaint.setStyle(Paint.Style.FILL);
             mStrokePaint.setStyle(Paint.Style.STROKE);
+            mPillBorderPaint.setStyle(Paint.Style.STROKE);
+            mPillBorderPaint.setStrokeWidth(dpF(context, 0.9f));
             mPillTextPaint.setTypeface(typeface(600));
             mPillTextPaint.setTextSize(dpF(context, 9.6f));
             mBadgeTextPaint.setTypeface(typeface(600));
@@ -2287,6 +2727,7 @@ final class HyperSettingsUi {
         void setReduceEnabled(boolean enabled, boolean animate) {
             boolean changed = mReduceEnabled != enabled;
             mReduceEnabled = enabled;
+            syncShimmerState();
             float target = enabled ? 1f : 0f;
             if (!animate || !ValueAnimator.areAnimatorsEnabled() || !isAttachedToWindow()) {
                 cancelAnimator();
@@ -2307,6 +2748,31 @@ final class HyperSettingsUi {
                 invalidate();
             });
             mAnimator.start();
+        }
+
+        private void syncShimmerState() {
+            if (!mReduceEnabled || !isAttachedToWindow() || !ValueAnimator.areAnimatorsEnabled()) {
+                cancelShimmerAnimator();
+                return;
+            }
+            if (mShimmerAnimator != null && mShimmerAnimator.isRunning()) {
+                return;
+            }
+            mShimmerAnimator = ValueAnimator.ofFloat(0f, 360f);
+            mShimmerAnimator.setDuration(7200L);
+            mShimmerAnimator.setRepeatCount(ValueAnimator.INFINITE);
+            mShimmerAnimator.setInterpolator(new LinearInterpolator());
+            mShimmerAnimator.addUpdateListener(anim -> {
+                mShimmerPhaseDeg = (float) anim.getAnimatedValue();
+                invalidate();
+            });
+            mShimmerAnimator.start();
+        }
+
+        @Override
+        protected void onAttachedToWindow() {
+            super.onAttachedToWindow();
+            syncShimmerState();
         }
 
         @Override
@@ -2349,41 +2815,57 @@ final class HyperSettingsUi {
             float offTotalH = cardH * 3f + cardGap * 2f;
             float offStartY = (totalH - offTotalH) * 0.5f;
 
-            // ON vertical layout: top "减少干扰" sparkle-stack pill + 1 breakthrough card + 2 quiet cards
-            float pillH = dpF(getContext(), 20f);
-            float pillGap = dpF(getContext(), 10f);
+            // ON vertical layout: top "减少干扰" Apple Intelligence pill + 1 breakthrough card + 2 quiet cards
+            float pillH = dpF(getContext(), 22f);
+            float pillGap = dpF(getContext(), 9f);
             float onTotalH = pillH + pillGap + cardH * 3f + cardGap * 2f;
-            float onTop = Math.max(dpF(getContext(), 10f), (totalH - onTotalH) * 0.5f);
+            float onTop = Math.max(dpF(getContext(), 9f), (totalH - onTotalH) * 0.5f);
 
-            // 1. Top "减少干扰" focus pill with custom Sparkle-Stack icon
+            // 1. Top "减少干扰" focus pill with Apple Intelligence iridescent 7-lobe ribbon
             if (r > 0.02f) {
-                float iconSize = dpF(getContext(), 12.5f);
+                float iconSize = dpF(getContext(), 15.5f);
                 float labelW = mPillTextPaint.measureText(MODE_LABEL);
-                float pillPadH = dpF(getContext(), 9f);
-                float iconTextGap = dpF(getContext(), 4.5f);
-                float pillW = pillPadH * 2f + iconSize + iconTextGap + labelW;
+                float pillPadStart = dpF(getContext(), 7.5f);
+                float pillPadEnd = dpF(getContext(), 9.5f);
+                float iconTextGap = dpF(getContext(), 4.0f);
+                float pillW = pillPadStart + iconSize + iconTextGap + labelW + pillPadEnd;
                 float pillLeft = stageLeft + (stageW - pillW) * 0.5f;
                 float pillTop = lerp(onTop - dpF(getContext(), 6f), onTop, r);
+                float pillRight = pillLeft + pillW;
 
-                mRect.set(pillLeft, pillTop, pillLeft + pillW, pillTop + pillH);
-                mFillPaint.setColor(withAlpha(mPalette.accentSoftBg, r));
+                mRect.set(pillLeft, pillTop, pillRight, pillTop + pillH);
+                int pillFill = mPalette.dark ? 0xFF211E2E : 0xFFFFFFFF;
+                mFillPaint.setColor(withAlpha(pillFill, r));
                 canvas.drawRoundRect(mRect, pillH * 0.5f, pillH * 0.5f, mFillPaint);
 
-                int iconColor = withAlpha(mPalette.accent, r);
-                mStrokePaint.setColor(iconColor);
-                mFillPaint.setColor(iconColor);
-                ReduceInterruptions.drawSparkleStack(
+                if (mPillBorderShader == null || mPillGradLeft != pillLeft || mPillGradRight != pillRight) {
+                    mPillGradLeft = pillLeft;
+                    mPillGradRight = pillRight;
+                    int[] borderColors = mPalette.dark
+                            ? new int[]{0x704EC8FF, 0x85BA7AF8, 0x70FF667C, 0x70FFB868}
+                            : new int[]{0x5820A6F6, 0x6C9E52EE, 0x58F2486A, 0x58F69434};
+                    mPillBorderShader = new LinearGradient(
+                            pillLeft, 0f, pillRight, 0f, borderColors, null, Shader.TileMode.CLAMP);
+                    mPillBorderPaint.setShader(mPillBorderShader);
+                }
+                mPillBorderPaint.setAlpha(Math.round(255f * r));
+                canvas.drawRoundRect(mRect, pillH * 0.5f, pillH * 0.5f, mPillBorderPaint);
+
+                mAppleIconPainter.draw(
                         canvas,
-                        pillLeft + pillPadH,
+                        pillLeft + pillPadStart,
                         pillTop + (pillH - iconSize) * 0.5f,
                         iconSize,
-                        mStrokePaint,
-                        mFillPaint);
+                        1.72f,
+                        0.06f,
+                        mShimmerPhaseDeg,
+                        r);
 
-                mPillTextPaint.setColor(iconColor);
+                int textColor = mPalette.dark ? 0xFFD8CEFF : 0xFF6346D8;
+                mPillTextPaint.setColor(withAlpha(textColor, r));
                 Paint.FontMetrics fm = mPillTextPaint.getFontMetrics();
                 float baseline = (pillTop + pillH * 0.5f) - (fm.ascent + fm.descent) * 0.5f;
-                canvas.drawText(MODE_LABEL, pillLeft + pillPadH + iconSize + iconTextGap,
+                canvas.drawText(MODE_LABEL, pillLeft + pillPadStart + iconSize + iconTextGap,
                         baseline, mPillTextPaint);
             }
 
@@ -2412,7 +2894,35 @@ final class HyperSettingsUi {
             float cardH = bottom - top;
             mRect.set(left, top, right, bottom);
             buildSquirclePath(mRect, radius, mCardPath);
+            float cx = mRect.centerX();
+            float cy = mRect.centerY();
 
+            // Subtle outward-clipped Nebula Aurora glow on VIP breakthrough card
+            if (r > 0.04f) {
+                SweepGradient aura = new SweepGradient(cx, cy,
+                        new int[]{
+                                mPalette.previewNebulaCyan,
+                                mPalette.previewNebulaAzure,
+                                mPalette.previewNebulaViolet,
+                                mPalette.previewNebulaMoon,
+                                mPalette.previewNebulaCyan
+                        },
+                        new float[]{0f, 0.24f, 0.50f, 0.74f, 1f});
+                mStrokePaint.setShader(aura);
+                int saved = canvas.save();
+                canvas.clipOutPath(mCardPath);
+                mStrokePaint.setStrokeWidth(dpF(getContext(), 6.0f));
+                mStrokePaint.setAlpha(Math.round((mPalette.dark ? 0.09f : 0.07f) * r * 255f));
+                canvas.drawPath(mCardPath, mStrokePaint);
+                mStrokePaint.setStrokeWidth(dpF(getContext(), 3.0f));
+                mStrokePaint.setAlpha(Math.round((mPalette.dark ? 0.14f : 0.11f) * r * 255f));
+                canvas.drawPath(mCardPath, mStrokePaint);
+                canvas.restoreToCount(saved);
+                mStrokePaint.setShader(null);
+                mStrokePaint.setAlpha(255);
+            }
+
+            mFillPaint.setShader(null);
             if (!mPalette.dark) {
                 mFillPaint.setColor(0x0D000000);
                 canvas.save();
@@ -2421,14 +2931,25 @@ final class HyperSettingsUi {
                 canvas.restore();
             }
 
-            int fill = blendColor(mPalette.previewNormalCard, mPalette.previewPriorityCard, r);
+            int fill = blendColor(mPalette.previewNormalCard, mPalette.previewNebulaCard, r);
             mFillPaint.setColor(fill);
             canvas.drawPath(mCardPath, mFillPaint);
 
             if (r > 0.04f) {
-                mStrokePaint.setColor(withAlpha(mPalette.previewPriorityOuterStroke, (mPalette.dark ? 0.72f : 0.65f) * r));
-                mStrokePaint.setStrokeWidth(dpF(getContext(), 1.15f));
+                SweepGradient rim = new SweepGradient(cx, cy,
+                        new int[]{
+                                withAlpha(mPalette.previewNebulaCyan, (mPalette.dark ? 0.84f : 0.78f) * r),
+                                withAlpha(mPalette.previewNebulaAzure, (mPalette.dark ? 0.80f : 0.74f) * r),
+                                withAlpha(mPalette.previewNebulaViolet, (mPalette.dark ? 0.84f : 0.78f) * r),
+                                withAlpha(mPalette.previewNebulaMoon, (mPalette.dark ? 0.86f : 0.65f) * r),
+                                withAlpha(mPalette.previewNebulaCyan, (mPalette.dark ? 0.84f : 0.78f) * r)
+                        },
+                        new float[]{0f, 0.24f, 0.50f, 0.74f, 1f});
+                mStrokePaint.setAlpha(255);
+                mStrokePaint.setShader(rim);
+                mStrokePaint.setStrokeWidth(dpF(getContext(), 1.2f));
                 canvas.drawPath(mCardPath, mStrokePaint);
+                mStrokePaint.setShader(null);
             }
 
             float iconSize = dpF(getContext(), 21f);
@@ -2436,12 +2957,14 @@ final class HyperSettingsUi {
             float iconTop = top + (cardH - iconSize) * 0.5f;
             mRect.set(iconLeft, iconTop, iconLeft + iconSize, iconTop + iconSize);
             buildSquirclePath(mRect, dpF(getContext(), 6.5f), mIconPath);
-            mFillPaint.setColor(blendColor(mPalette.previewNormalIcon, mPalette.previewPriorityIconBg, r));
+            mFillPaint.setColor(blendColor(mPalette.previewNormalIcon, mPalette.previewNebulaIconBg, r));
             canvas.drawPath(mIconPath, mFillPaint);
 
             if (r > 0.05f) {
-                drawSparkle(canvas, iconLeft + iconSize * 0.5f, iconTop + iconSize * 0.5f,
-                        dpF(getContext(), 4.5f), withAlpha(mPalette.previewPriorityIconGlyph, r));
+                float sx = iconLeft + iconSize * 0.5f;
+                float sy = iconTop + iconSize * 0.5f;
+                float sr = dpF(getContext(), 4.5f);
+                drawGradientSparkle(canvas, sx, sy, sr, r);
             }
 
             float textLeft = iconLeft + iconSize + dpF(getContext(), 9f);
@@ -2454,24 +2977,25 @@ final class HyperSettingsUi {
             float gap = dpF(getContext(), 5.2f);
             float linesTop = top + (cardH - (l1H + gap + l2H)) * 0.5f;
 
-            mFillPaint.setColor(blendColor(mPalette.previewSkeletonPrimary, mPalette.previewPriorityLinePrimary, r));
+            mFillPaint.setShader(null);
+            mFillPaint.setColor(blendColor(mPalette.previewSkeletonPrimary, mPalette.previewNebulaLinePrimary, r));
             mRect.set(textLeft, linesTop, textLeft + textMaxW * 0.62f, linesTop + l1H);
             canvas.drawRoundRect(mRect, l1H * 0.5f, l1H * 0.5f, mFillPaint);
 
-            mFillPaint.setColor(blendColor(mPalette.previewSkeletonSecondary, mPalette.previewPriorityLineSecondary, r));
+            mFillPaint.setColor(blendColor(mPalette.previewSkeletonSecondary, mPalette.previewNebulaLineSecondary, r));
             mRect.set(textLeft, linesTop + l1H + gap, textLeft + textMaxW * 0.92f, linesTop + l1H + gap + l2H);
             canvas.drawRoundRect(mRect, l2H * 0.5f, l2H * 0.5f, mFillPaint);
 
-            // Right side: when ON -> "放行提醒" warm amber pill; when OFF -> ordinary dot
+            // Right side: when ON -> cool Nebula "放行提醒" pill; when OFF -> ordinary dot
             if (r > 0.06f) {
                 float pillH = dpF(getContext(), 15f);
                 float pillLeft = rightEdge - badgeW;
                 float pillTop = top + (cardH - pillH) * 0.5f;
                 mRect.set(pillLeft, pillTop, rightEdge, pillTop + pillH);
-                mFillPaint.setColor(withAlpha(mPalette.statusWarnBg, r));
+                mFillPaint.setColor(withAlpha(mPalette.previewNebulaPillBg, r));
                 canvas.drawRoundRect(mRect, pillH * 0.5f, pillH * 0.5f, mFillPaint);
 
-                mBadgeTextPaint.setColor(withAlpha(mPalette.previewPriorityBadgeText, r));
+                mBadgeTextPaint.setColor(withAlpha(mPalette.previewNebulaBadgeText, r));
                 Paint.FontMetrics fm = mBadgeTextPaint.getFontMetrics();
                 float base = (pillTop + pillH * 0.5f) - (fm.ascent + fm.descent) * 0.5f;
                 float tw = mBadgeTextPaint.measureText(ALLOW_LABEL);
@@ -2548,17 +3072,23 @@ final class HyperSettingsUi {
             }
         }
 
-        private void drawSparkle(Canvas canvas, float cx, float cy, float r, int color) {
-            float inner = r * 0.28f;
+        private void drawGradientSparkle(Canvas canvas, float cx, float cy, float r, float alphaScale) {
+            float inner = r * 0.25f;
             mSparklePath.reset();
             mSparklePath.moveTo(cx, cy - r);
-            mSparklePath.quadTo(cx + inner * 0.4f, cy - inner * 0.4f, cx + r, cy);
-            mSparklePath.quadTo(cx + inner * 0.4f, cy + inner * 0.4f, cx, cy + r);
-            mSparklePath.quadTo(cx - inner * 0.4f, cy + inner * 0.4f, cx - r, cy);
-            mSparklePath.quadTo(cx - inner * 0.4f, cy - inner * 0.4f, cx, cy - r);
+            mSparklePath.quadTo(cx + inner * 0.42f, cy - inner * 0.42f, cx + r, cy);
+            mSparklePath.quadTo(cx + inner * 0.42f, cy + inner * 0.42f, cx, cy + r);
+            mSparklePath.quadTo(cx - inner * 0.42f, cy + inner * 0.42f, cx - r, cy);
+            mSparklePath.quadTo(cx - inner * 0.42f, cy - inner * 0.42f, cx, cy - r);
             mSparklePath.close();
-            mFillPaint.setColor(color);
+            mFillPaint.setAlpha(255);
+            mFillPaint.setShader(new LinearGradient(
+                    cx - r, cy - r, cx + r, cy + r,
+                    withAlpha(mPalette.previewNebulaCyan, alphaScale),
+                    withAlpha(mPalette.previewNebulaViolet, alphaScale),
+                    Shader.TileMode.CLAMP));
             canvas.drawPath(mSparklePath, mFillPaint);
+            mFillPaint.setShader(null);
         }
 
         private static float lerp(float a, float b, float t) {
@@ -2568,6 +3098,7 @@ final class HyperSettingsUi {
         @Override
         protected void onDetachedFromWindow() {
             cancelAnimator();
+            cancelShimmerAnimator();
             super.onDetachedFromWindow();
         }
 
@@ -2576,6 +3107,14 @@ final class HyperSettingsUi {
                 mAnimator.cancel();
                 mAnimator = null;
             }
+        }
+
+        private void cancelShimmerAnimator() {
+            if (mShimmerAnimator != null) {
+                mShimmerAnimator.cancel();
+                mShimmerAnimator = null;
+            }
+            mShimmerPhaseDeg = 0f;
         }
     }
 }

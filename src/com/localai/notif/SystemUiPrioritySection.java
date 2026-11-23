@@ -2,17 +2,23 @@ package com.localai.notif;
 
 import android.content.Context;
 import android.graphics.Canvas;
+import android.graphics.LinearGradient;
+import android.graphics.Matrix;
+import android.graphics.Paint;
+import android.graphics.Path;
+import android.graphics.RectF;
+import android.graphics.Shader;
+import android.graphics.SweepGradient;
 import android.graphics.Typeface;
-import android.graphics.drawable.GradientDrawable;
 import android.service.notification.StatusBarNotification;
 import android.util.Log;
+import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
-import android.widget.TextView;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
@@ -411,15 +417,20 @@ final class SystemUiPrioritySection {
                 "status_bar_notification_section_header", "layout", "com.android.systemui");
         ViewGroup header = (ViewGroup) LayoutInflater.from(context).inflate(layout, null, false);
         ViewGroup contents = (ViewGroup) headerContents.get(header);
+        header.setClipChildren(false);
+        header.setClipToPadding(false);
+        contents.setClipChildren(false);
+        contents.setClipToPadding(false);
         contents.removeAllViews();
-        contents.addView(createTitle(context), new ViewGroup.LayoutParams(
+        PriorityCapsuleView capsule = new PriorityCapsuleView(context);
+        contents.addView(createTitleContainer(context, capsule), new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         header.setLayoutParams(new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         header.setClickable(false);
         header.setFocusable(false);
         setHeaderVisible.invoke(header, true, false);
-        PrioritySectionFrame frame = new PrioritySectionFrame(header, contents, getClipHeight,
+        PrioritySectionFrame frame = new PrioritySectionFrame(header, contents, capsule, getClipHeight,
                 getClipTopAmount, getTopOverlap, getSuperAlpha, getSuperTransitionAlpha, getIsExpanded);
         header.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
             @Override
@@ -463,25 +474,275 @@ final class SystemUiPrioritySection {
 
     private record PriorityPresentation(Object controller, PrioritySectionFrame frame) {}
 
-    private static View createTitle(Context context) {
+    private static View createTitleContainer(Context context, PriorityCapsuleView capsule) {
         FrameLayout frame = new FrameLayout(context);
-        frame.setPaddingRelative(dp(context, 13), dp(context, 5), dp(context, 13), dp(context, 5));
-        TextView title = new TextView(context);
-        String language = context.getResources().getConfiguration().getLocales().get(0).getLanguage();
-        title.setText("zh".equals(language) ? "重要通知" : "Important notifications");
-        title.setAccessibilityHeading(true);
-        title.setTextSize(14);
-        title.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-        title.setTextColor(0xff432d0a);
-        title.setPaddingRelative(dp(context, 11), dp(context, 4), dp(context, 11), dp(context, 4));
-        GradientDrawable background = new GradientDrawable();
-        background.setColor(0xfff4c15c);
-        background.setCornerRadius(dp(context, 7));
-        title.setBackground(background);
+        frame.setClipChildren(false);
+        frame.setClipToPadding(false);
+        frame.setPaddingRelative(0, dp(context, 2), 0, dp(context, 6));
         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.START);
-        frame.addView(title, params);
+        frame.addView(capsule, params);
         return frame;
+    }
+
+    /**
+     * Ultra-translucent HyperOS 4 liquid-glass micro-capsule header ("✦ 重要通知") with adaptive
+     * dark smoked-glass / light frosted-glass surfaces, cyan-violet 4-point sparkle, crisp 0.6dp
+     * specular rim, and synchronized one-shot Nebula Aurora shimmer.
+     */
+    static final class PriorityCapsuleView extends View {
+        private static final int[] DARK_RIM = {
+                0x78EDF6FF, 0x565CE1FF, 0x52A17DFF, 0x38FFFFFF, 0x78EDF6FF
+        };
+        private static final int[] LIGHT_RIM = {
+                0x781CA3EC, 0x6A2B75F0, 0x727458F2, 0x8CFFFFFF, 0x781CA3EC
+        };
+        private static final int[] SHIMMER_COMET = {
+                0x005CE1FF, 0x005CE1FF, 0xC85CE1FF, 0xFFFFFFFF, 0xD4A17DFF, 0x00A17DFF, 0x005CE1FF
+        };
+        private static final float[] RIM_STOPS = {0f, 0.25f, 0.55f, 0.80f, 1f};
+        private static final float[] COMET_STOPS = {0f, 0.66f, 0.78f, 0.88f, 0.94f, 0.99f, 1f};
+
+        private final String label;
+        private final float density;
+        private final float shadowPad;
+        private final float pillHeight;
+        private final float padStart;
+        private final float padEnd;
+        private final float sparkleRadius;
+        private final float iconTextGap;
+
+        private final Paint fillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint sheenPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint rimPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint cometPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint sparklePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint sparkleGlowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+        private final RectF pillRect = new RectF();
+        private final Path sparklePath = new Path();
+        private final Matrix shaderMatrix = new Matrix();
+
+        private LinearGradient surfaceShader;
+        private LinearGradient sheenShader;
+        private LinearGradient sparkleShader;
+        private SweepGradient rimShader;
+        private SweepGradient cometShader;
+
+        private boolean darkAppearance = true;
+        private float shimmerProgress;
+        private float shimmerBoost;
+        private float cachedW = -1f;
+        private float cachedH = -1f;
+        private boolean cachedDark = true;
+
+        PriorityCapsuleView(Context context) {
+            super(context);
+            density = context.getResources().getDisplayMetrics().density;
+            String language = context.getResources().getConfiguration().getLocales().get(0).getLanguage();
+            label = "zh".equals(language) ? "重要通知" : "Important notifications";
+
+            shadowPad = 2f * density;
+            pillHeight = 25.5f * density;
+            padStart = 9.5f * density;
+            padEnd = 11f * density;
+            sparkleRadius = 5.3f * density;
+            iconTextGap = 5.5f * density;
+
+            fillPaint.setStyle(Paint.Style.FILL);
+            sheenPaint.setStyle(Paint.Style.FILL);
+
+            rimPaint.setStyle(Paint.Style.STROKE);
+            rimPaint.setStrokeWidth(0.6f * density);
+
+            cometPaint.setStyle(Paint.Style.STROKE);
+            cometPaint.setStrokeWidth(0.95f * density);
+
+            sparklePaint.setStyle(Paint.Style.FILL);
+            sparkleGlowPaint.setStyle(Paint.Style.FILL);
+
+            textPaint.setTypeface(Typeface.create(Typeface.DEFAULT, 500, false));
+            textPaint.setTextSize(TypedValue.applyDimension(
+                    TypedValue.COMPLEX_UNIT_SP, 12.2f, context.getResources().getDisplayMetrics()));
+            textPaint.setLetterSpacing(0.015f);
+
+            setContentDescription(label);
+            setAccessibilityHeading(true);
+            setClickable(false);
+            setFocusable(false);
+            applyInkStyle();
+        }
+
+        void setDarkAppearance(boolean dark) {
+            if (darkAppearance == dark) return;
+            darkAppearance = dark;
+            applyInkStyle();
+            invalidateShaders();
+            invalidate();
+        }
+
+        void setShimmer(float progress, float boost) {
+            if (shimmerProgress == progress && shimmerBoost == boost) return;
+            shimmerProgress = progress;
+            shimmerBoost = boost;
+            invalidate();
+        }
+
+        private void applyInkStyle() {
+            if (darkAppearance) {
+                textPaint.setColor(0xF5FFFFFF);
+                textPaint.setShadowLayer(1.6f * density, 0f, 0.55f * density, 0x5A000000);
+            } else {
+                textPaint.setColor(0xE0131A2B);
+                textPaint.clearShadowLayer();
+            }
+        }
+
+        private void invalidateShaders() {
+            surfaceShader = null;
+            sheenShader = null;
+            sparkleShader = null;
+            rimShader = null;
+            cometShader = null;
+        }
+
+        @Override
+        protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+            float textWidth = textPaint.measureText(label);
+            float contentW = padStart + sparkleRadius * 2f + iconTextGap + textWidth + padEnd;
+            int w = Math.round(contentW + shadowPad * 2f);
+            int h = Math.round(pillHeight + shadowPad * 2f);
+            setMeasuredDimension(
+                    resolveSize(w, widthMeasureSpec),
+                    resolveSize(h, heightMeasureSpec));
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            float w = getWidth();
+            float h = getHeight();
+            if (w <= shadowPad * 2f || h <= shadowPad * 2f) return;
+
+            pillRect.set(shadowPad, shadowPad, w - shadowPad, h - shadowPad);
+            float r = pillRect.height() * 0.5f;
+            float cx = pillRect.centerX();
+            float cy = pillRect.centerY();
+
+            ensureShaders(w, h);
+
+            // 1. Subtle ambient lift shadow for bright lockscreen wallpapers
+            fillPaint.setShader(null);
+            fillPaint.setColor(darkAppearance ? 0x2B050914 : 0x12142342);
+            canvas.save();
+            canvas.translate(0f, 0.9f * density);
+            canvas.drawRoundRect(pillRect, r, r, fillPaint);
+            canvas.restore();
+
+            // 2. Translucent liquid glass surface + top inner specular sheen
+            fillPaint.setAlpha(255);
+            fillPaint.setShader(surfaceShader);
+            canvas.drawRoundRect(pillRect, r, r, fillPaint);
+
+            sheenPaint.setAlpha(255);
+            sheenPaint.setShader(sheenShader);
+            canvas.drawRoundRect(pillRect, r, r, sheenPaint);
+
+            // 3. Crisp 0.6dp ice-white / Nebula specular rim
+            float inset = 0.35f * density;
+            pillRect.inset(inset, inset);
+            float rimR = pillRect.height() * 0.5f;
+
+            shaderMatrix.reset();
+            shaderMatrix.setRotate(-30f + shimmerProgress * 360f, cx, cy);
+            rimShader.setLocalMatrix(shaderMatrix);
+            rimPaint.setShader(rimShader);
+            rimPaint.setAlpha(Math.min(255, Math.round((0.88f + 0.12f * shimmerBoost) * 255f)));
+            canvas.drawRoundRect(pillRect, rimR, rimR, rimPaint);
+
+            // 4. Synchronized shimmer glint around the pill rim during the 1.4s sweep
+            if (shimmerBoost > 0.01f) {
+                shaderMatrix.reset();
+                shaderMatrix.setRotate(-115f + shimmerProgress * 360f, cx, cy);
+                cometShader.setLocalMatrix(shaderMatrix);
+                cometPaint.setShader(cometShader);
+                cometPaint.setAlpha(Math.min(255, Math.round(shimmerBoost * 225f)));
+                canvas.drawRoundRect(pillRect, rimR, rimR, cometPaint);
+            }
+
+            // 5. Crisp 4-point Nebula AI sparkle + subtle shimmer bloom
+            float sparkleCx = shadowPad + padStart + sparkleRadius;
+            if (shimmerBoost > 0.01f) {
+                buildSparklePath(sparkleCx, cy, sparkleRadius * (1.28f + 0.12f * shimmerBoost));
+                sparkleGlowPaint.setColor(darkAppearance ? 0xFF9BEAFF : 0xFF5C9EFF);
+                sparkleGlowPaint.setAlpha(Math.round(shimmerBoost * 96f));
+                canvas.drawPath(sparklePath, sparkleGlowPaint);
+            }
+            buildSparklePath(sparkleCx, cy, sparkleRadius);
+            sparklePaint.setShader(sparkleShader);
+            sparklePaint.setAlpha(255);
+            canvas.drawPath(sparklePath, sparklePaint);
+            if (shimmerBoost > 0.01f) {
+                sparkleGlowPaint.setColor(0xFFFFFFFF);
+                sparkleGlowPaint.setAlpha(Math.round(shimmerBoost * 165f));
+                canvas.drawPath(sparklePath, sparkleGlowPaint);
+            }
+
+            // 6. Crisp MiSans Medium title text
+            Paint.FontMetrics fm = textPaint.getFontMetrics();
+            float baseline = cy - (fm.ascent + fm.descent) * 0.5f;
+            float textX = sparkleCx + sparkleRadius + iconTextGap;
+            canvas.drawText(label, textX, baseline, textPaint);
+        }
+
+        private void buildSparklePath(float cx, float cy, float r) {
+            float inner = r * 0.25f;
+            sparklePath.reset();
+            sparklePath.moveTo(cx, cy - r);
+            sparklePath.quadTo(cx + inner * 0.42f, cy - inner * 0.42f, cx + r, cy);
+            sparklePath.quadTo(cx + inner * 0.42f, cy + inner * 0.42f, cx, cy + r);
+            sparklePath.quadTo(cx - inner * 0.42f, cy + inner * 0.42f, cx - r, cy);
+            sparklePath.quadTo(cx - inner * 0.42f, cy - inner * 0.42f, cx, cy - r);
+            sparklePath.close();
+        }
+
+        private void ensureShaders(float w, float h) {
+            if (surfaceShader != null && cachedDark == darkAppearance
+                    && Math.abs(cachedW - w) < 0.5f && Math.abs(cachedH - h) < 0.5f) {
+                return;
+            }
+            cachedW = w;
+            cachedH = h;
+            cachedDark = darkAppearance;
+
+            float top = shadowPad;
+            float bot = h - shadowPad;
+            float cx = w * 0.5f;
+            float cy = h * 0.5f;
+
+            surfaceShader = new LinearGradient(
+                    0f, top, 0f, bot,
+                    darkAppearance ? 0x7A1C253A : 0xD6F8FBFF,
+                    darkAppearance ? 0x5E111726 : 0xBEEBF3FE,
+                    Shader.TileMode.CLAMP);
+            sheenShader = new LinearGradient(
+                    0f, top, 0f, top + (bot - top) * 0.52f,
+                    darkAppearance ? 0x26FFFFFF : 0x6AFFFFFF,
+                    0x00FFFFFF,
+                    Shader.TileMode.CLAMP);
+
+            float sx = shadowPad + padStart;
+            sparkleShader = new LinearGradient(
+                    sx, cy - sparkleRadius,
+                    sx + sparkleRadius * 2f, cy + sparkleRadius,
+                    darkAppearance ? 0xFF64E6FF : 0xFF1CA3EC,
+                    darkAppearance ? 0xFFA685FF : 0xFF7458F2,
+                    Shader.TileMode.CLAMP);
+
+            rimShader = new SweepGradient(cx, cy,
+                    darkAppearance ? DARK_RIM : LIGHT_RIM, RIM_STOPS);
+            cometShader = new SweepGradient(cx, cy, SHIMMER_COMET, COMET_STOPS);
+        }
     }
 
     private static int dp(Context context, int value) {

@@ -11,6 +11,7 @@ import android.net.Uri;
 import android.os.Binder;
 import android.os.Bundle;
 import android.os.Process;
+import android.os.SystemClock;
 import android.service.quicksettings.TileService;
 import android.util.Log;
 
@@ -83,6 +84,9 @@ public final class InferenceProvider extends ContentProvider {
     private long mEngineGeneration;
     private ScheduledFuture<?> mIdleUnloadTask;
     private volatile boolean mAlwaysLoadModel = Config.DEFAULT_ALWAYS_LOAD_MODEL;
+    private volatile long mLastSystemServerContactMs;
+    private volatile int mSystemHookVersionCode;
+    private volatile String mSystemHookFramework = "";
 
     @Override
     public boolean onCreate() {
@@ -107,8 +111,18 @@ public final class InferenceProvider extends ContentProvider {
         }
     }
 
+    static void markSystemServerActive() {
+        InferenceProvider instance = sInstance;
+        if (instance != null) {
+            instance.mLastSystemServerContactMs = SystemClock.elapsedRealtime();
+        }
+    }
+
     @Override
     public Bundle call(String method, String arg, Bundle extras) {
+        if (Binder.getCallingUid() == Process.SYSTEM_UID) {
+            mLastSystemServerContactMs = SystemClock.elapsedRealtime();
+        }
         switch (method) {
             case METHOD_GET_CONFIG:
                 return getConfig();
@@ -118,6 +132,8 @@ public final class InferenceProvider extends ContentProvider {
                 return setConfig(extras);
             case Config.METHOD_SYNC_REDUCE_STATE:
                 return syncReduceState(extras);
+            case Config.METHOD_REPORT_HOOK_ACTIVE:
+                return reportHookActive(extras);
             case Config.METHOD_SET_MODEL_PATH:
                 return setModelPath(extras);
             case METHOD_SUMMARIZE:
@@ -134,6 +150,9 @@ public final class InferenceProvider extends ContentProvider {
     }
 
     private Bundle getConfig() {
+        if (Binder.getCallingUid() == Process.SYSTEM_UID) {
+            mLastSystemServerContactMs = SystemClock.elapsedRealtime();
+        }
         Context context = getContext();
         SharedPreferences prefs = context.getSharedPreferences(
                 Config.PREFS_NAME, Context.MODE_PRIVATE);
@@ -161,13 +180,21 @@ public final class InferenceProvider extends ContentProvider {
                 Config.KEY_REDUCE_ENABLED, Config.DEFAULT_REDUCE_ENABLED));
         out.putBoolean(Config.KEY_REDUCE_LOCK_SCREEN_ONLY, prefs.getBoolean(
                 Config.KEY_REDUCE_LOCK_SCREEN_ONLY, Config.DEFAULT_REDUCE_LOCK_SCREEN_ONLY));
+        out.putBoolean(Config.KEY_REDUCE_FILTER_ICONS, prefs.getBoolean(
+                Config.KEY_REDUCE_FILTER_ICONS, Config.DEFAULT_REDUCE_FILTER_ICONS));
+        out.putBoolean(Config.KEY_REDUCE_NORMAL_SOUNDS, prefs.getBoolean(Config.KEY_REDUCE_NORMAL_SOUNDS, false));
         out.putString(Config.KEY_MODEL_PATH, modelPath);
         out.putString(Config.KEY_DOWNLOAD_SOURCE, sanitizeDownloadSource(
                 prefs.getString(Config.KEY_DOWNLOAD_SOURCE, Config.DEFAULT_DOWNLOAD_SOURCE)));
         out.putBoolean(Config.KEY_WIFI_ONLY_DOWNLOAD, prefs.getBoolean(
                 Config.KEY_WIFI_ONLY_DOWNLOAD, Config.DEFAULT_WIFI_ONLY_DOWNLOAD));
         out.putBoolean(Config.KEY_ALWAYS_LOAD_MODEL, alwaysLoad);
+        out.putBoolean(Config.KEY_SHOW_IN_SYSTEM_SETTINGS, prefs.getBoolean(
+                Config.KEY_SHOW_IN_SYSTEM_SETTINGS, Config.DEFAULT_SHOW_IN_SYSTEM_SETTINGS));
         out.putBoolean(Config.KEY_MODEL_READY, ModelCatalog.isModelDirValid(new File(modelPath)));
+        out.putBoolean(Config.KEY_SYSTEM_HOOK_ACTIVE, mLastSystemServerContactMs > 0L);
+        out.putInt(Config.KEY_SYSTEM_HOOK_VERSION_CODE, mSystemHookVersionCode);
+        out.putString(Config.KEY_SYSTEM_HOOK_FRAMEWORK, mSystemHookFramework);
         synchronized (mStateLock) {
             out.putBoolean(Config.KEY_ENGINE_LOADED, mEngine != null);
             out.putBoolean(Config.KEY_ENGINE_LOADING, mEngineLoading);
@@ -226,6 +253,16 @@ public final class InferenceProvider extends ContentProvider {
             changed = true;
             notifySystem = true;
         }
+        if (input.containsKey(Config.KEY_REDUCE_FILTER_ICONS)) {
+            editor.putBoolean(Config.KEY_REDUCE_FILTER_ICONS, input.getBoolean(Config.KEY_REDUCE_FILTER_ICONS));
+            changed = true;
+            notifySystem = true;
+        }
+        if (input.containsKey(Config.KEY_REDUCE_NORMAL_SOUNDS)) {
+            editor.putBoolean(Config.KEY_REDUCE_NORMAL_SOUNDS, input.getBoolean(Config.KEY_REDUCE_NORMAL_SOUNDS));
+            changed = true;
+            notifySystem = true;
+        }
         if (input.containsKey(Config.KEY_SUMMARIZE_SCREEN_ON)) {
             editor.putBoolean(Config.KEY_SUMMARIZE_SCREEN_ON, input.getBoolean(Config.KEY_SUMMARIZE_SCREEN_ON));
             changed = true;
@@ -271,6 +308,11 @@ public final class InferenceProvider extends ContentProvider {
             notifySystem = true;
             alwaysLoadChanged = true;
         }
+        if (input.containsKey(Config.KEY_SHOW_IN_SYSTEM_SETTINGS)) {
+            editor.putBoolean(Config.KEY_SHOW_IN_SYSTEM_SETTINGS,
+                    input.getBoolean(Config.KEY_SHOW_IN_SYSTEM_SETTINGS));
+            changed = true;
+        }
 
         if (!changed) {
             return error("no recognized settings");
@@ -312,6 +354,9 @@ public final class InferenceProvider extends ContentProvider {
         if (caller != Process.myUid() && caller != Process.SYSTEM_UID) {
             throw new SecurityException("Only the module or system_server can sync reduce state");
         }
+        if (caller == Process.SYSTEM_UID) {
+            mLastSystemServerContactMs = SystemClock.elapsedRealtime();
+        }
         if (input == null || !input.containsKey(Config.KEY_REDUCE_ENABLED)) {
             return error("missing reduce state");
         }
@@ -323,6 +368,35 @@ public final class InferenceProvider extends ContentProvider {
         }
         requestTileRefresh(context);
         Bundle out = getConfig();
+        out.putString(OUT_STATUS, STATUS_OK);
+        return out;
+    }
+
+    private Bundle reportHookActive(Bundle extras) {
+        int caller = Binder.getCallingUid();
+        if (caller != Process.SYSTEM_UID) {
+            throw new SecurityException("Only system_server can report hook liveness");
+        }
+        mLastSystemServerContactMs = SystemClock.elapsedRealtime();
+        if (extras != null) {
+            int ver = extras.getInt(Config.KEY_SYSTEM_HOOK_VERSION_CODE, 0);
+            if (ver > 0) {
+                mSystemHookVersionCode = ver;
+            }
+            String fw = extras.getString(Config.KEY_SYSTEM_HOOK_FRAMEWORK);
+            if (fw != null && !fw.isEmpty()) {
+                mSystemHookFramework = fw;
+            }
+        }
+        Context context = getContext();
+        if (context != null) {
+            try {
+                context.sendBroadcast(new Intent(Config.ACTION_HOOK_STATE_CHANGED)
+                        .setPackage(context.getPackageName()));
+            } catch (Throwable ignored) {
+            }
+        }
+        Bundle out = new Bundle();
         out.putString(OUT_STATUS, STATUS_OK);
         return out;
     }

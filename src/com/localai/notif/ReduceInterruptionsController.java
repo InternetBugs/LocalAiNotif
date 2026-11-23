@@ -3,11 +3,12 @@ package com.localai.notif;
 import android.app.AppOpsManager;
 import android.app.KeyguardManager;
 import android.app.Notification;
-import android.app.NotificationManager;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.media.AudioAttributes;
+import android.media.AudioManager;
 import android.net.Uri;
 import android.os.Binder;
 import android.os.Bundle;
@@ -16,15 +17,15 @@ import android.os.PowerManager;
 import android.os.Process;
 import android.os.SystemClock;
 import android.os.UserHandle;
+import android.service.notification.Condition;
 import android.service.notification.StatusBarNotification;
 import android.util.Log;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -34,6 +35,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
+import java.util.function.IntPredicate;
+import io.github.libxposed.api.XposedInterface.Invoker;
 
 /**
  * system_server controller for M4 "减少干扰" (Reduce Interruptions).
@@ -56,6 +59,7 @@ final class ReduceInterruptionsController {
     private static final int ORIGIN_USER_IN_SYSTEMUI = 5;
     private static final int MUTE_REASON_SILENT_UPDATE = 64;
     private static final long REALERT_ALLOW_WINDOW_MS = 6_000L;
+    private static final int KEEP_DURATION = -1;
 
     private final Context context;
     private final Object service;
@@ -71,6 +75,7 @@ final class ReduceInterruptionsController {
 
     private final Object zenModeHelper;
     private final Method zenGetZenMode;
+    private final Invoker<?, Method> nativeShouldIntercept;
     private final Method zenSetManualZenMode;
     private final Method zenApplyRestrictions;
     private final Field zenUserField;
@@ -88,7 +93,25 @@ final class ReduceInterruptionsController {
     /** Active state mirrored across system_server hooks (read concurrently). */
     private volatile boolean reduceActive;
     private volatile boolean lockScreenOnly = Config.DEFAULT_REDUCE_LOCK_SCREEN_ONLY;
+    private volatile boolean filterIcons;
+    private volatile boolean normalSounds;
+    private Method refreshAudioStreams;
+    private Object audioService;
+    private final AtomicBoolean iconRefreshPending = new AtomicBoolean();
+    private Set<String> lastIconVersions;
+    private final Map<String, String> grantedIconVersions = new HashMap<>();
     private volatile boolean configInitialized;
+    /** RTC epoch millis when timed Reduce Interruptions expires; 0 = untimed. */
+    private volatile long reduceDeadline;
+
+    // Native Zen normally expires first. This also handles an unavailable native condition.
+    private final Runnable deadlineExpiryRunnable = () -> {
+        long deadline = reduceDeadline;
+        if (reduceActive && deadline > 0L && System.currentTimeMillis() >= deadline) {
+            Log.i(TAG, "Timed Reduce Interruptions expired; turning off");
+            applyMode(ReduceInterruptions.MODE_OFF, true, KEEP_DURATION);
+        }
+    };
 
     /**
      * Snapshot of (key -> fingerprint) already present when Reduce Interruptions turned ON.
@@ -154,6 +177,9 @@ final class ReduceInterruptionsController {
         }
         Class<?> zenHelperClass = zenModeHelper.getClass();
         zenGetZenMode = ModuleMain.findMethod(zenHelperClass, "getZenMode");
+        Method shouldIntercept = ModuleMain.findMethod(zenHelperClass, "shouldIntercept", recordClass);
+        nativeShouldIntercept = shouldIntercept == null ? null
+                : module.getInvoker(shouldIntercept).setType(Invoker.Type.ORIGIN);
         zenSetManualZenMode = ModuleMain.findMethod(zenHelperClass, "setManualZenMode",
                 UserHandle.class, int.class, Uri.class, int.class, String.class,
                 String.class, boolean.class, int.class);
@@ -167,6 +193,12 @@ final class ReduceInterruptionsController {
 
     private void installHooks(ModuleMain module, ClassLoader loader,
             Class<?> recordClass, Class<?> zenHelperClass) {
+        installSoundPolicy(module, loader, zenHelperClass);
+        try {
+            ReduceNotificationSounds.install(module, loader, recordClass, () -> reduceActive && normalSounds);
+        } catch (Throwable error) {
+            Log.w(TAG, "Could not install Reduce Interruptions notification sound handling", error);
+        }
         // 1. Honor our independent "仅锁屏时生效" switch instead of MIUI's system DND setting.
         try {
             Class<?> zenStubImpl = loader.loadClass("com.android.server.notification.ZenModeStubImpl");
@@ -253,6 +285,12 @@ final class ReduceInterruptionsController {
                             };
                             // Usage 5 = AudioAttributes.USAGE_NOTIFICATION
                             applyRestriction.invoke(null, Boolean.FALSE, 5, appOps, exempt);
+                            if (normalSounds) {
+                                Method setRestriction = ModuleMain.findMethod(AppOpsManager.class, "setRestriction",
+                                        int.class, int.class, int.class, String[].class);
+                                if (setRestriction != null) setRestriction.invoke(appOps, 28,
+                                        AudioAttributes.USAGE_NOTIFICATION, AppOpsManager.MODE_ALLOWED, null);
+                            }
                         }
                     } catch (Throwable inner) {
                         Log.w(TAG, "Failed to ensure ReduceInterruptions notification AppOps exemption", inner);
@@ -344,16 +382,71 @@ final class ReduceInterruptionsController {
         }
     }
 
+    private void installSoundPolicy(ModuleMain module, ClassLoader loader, Class<?> zenClass) {
+        try {
+            Method apply = ModuleMain.findMethod(zenClass, "applyRestrictions", boolean.class, IntPredicate.class, int.class);
+            if (apply != null) {
+                module.hook(apply).intercept(chain -> {
+                    if (!(boolean) chain.getArg(0) || (int) chain.getArg(2) != 28 || !reduceActive || !normalSounds) {
+                        return chain.proceed();
+                    }
+                    IntPredicate original = (IntPredicate) chain.getArg(1);
+                    IntPredicate mute = usage -> !ReduceNotificationSounds.isNotificationUsage(usage)
+                            && usage != AudioAttributes.USAGE_ASSISTANCE_SONIFICATION && original.test(usage);
+                    return chain.proceed(new Object[]{true, mute, 28});
+                });
+            }
+            Class<?> audio = loader.loadClass("com.android.server.audio.AudioService");
+            Method affected = ModuleMain.findMethod(audio, "isStreamAffectedByCurrentZen", int.class);
+            if (affected == null) return;
+            module.hook(affected).intercept(chain -> {
+                int stream = (int) chain.getArg(0);
+                if (reduceActive && normalSounds && (stream == AudioManager.STREAM_SYSTEM
+                        || stream == AudioManager.STREAM_NOTIFICATION)) return false;
+                return chain.proceed();
+            });
+            Method updateMute = ModuleMain.findMethod(audio, "updateStreamMuteFromRingerMode");
+            if (updateMute != null) module.deoptimize(updateMute);
+            audioService = loader.loadClass("android.os.ServiceManager").getMethod("getService", String.class)
+                    .invoke(null, Context.AUDIO_SERVICE);
+            if (audio.isInstance(audioService)) refreshAudioStreams = ModuleMain.findMethod(audio, "updateRingerModeMutedStreams");
+        } catch (Throwable error) {
+            Log.w(TAG, "Could not install Reduce Interruptions audio policy", error);
+        }
+    }
+
     private void registerReceivers() {
-        // SystemUI (QuietModeTile) requests switching Reduce Interruptions -> Strict DND / Off.
+        // SystemUI (QuietModeTile / volume panel button) requests mode changes with optional countdown.
         context.registerReceiver(new BroadcastReceiver() {
             @Override
             public void onReceive(Context ignored, Intent intent) {
                 int mode = intent.getIntExtra(ReduceInterruptions.EXTRA_MODE, ReduceInterruptions.MODE_OFF);
-                handler.post(() -> applyMode(mode, true));
+                if (mode == ReduceInterruptions.MODE_QUERY) {
+                    broadcastState(safeGetZenMode(), false, false, true);
+                    return;
+                }
+                int duration = intent.getIntExtra(ReduceInterruptions.EXTRA_DURATION_MINUTES, KEEP_DURATION);
+                applyMode(mode, true, duration);
             }
         }, new IntentFilter(ReduceInterruptions.ACTION_REQUEST_MODE),
                 "android.permission.STATUS_BAR_SERVICE", handler, Context.RECEIVER_EXPORTED);
+        IntentFilter screen = new IntentFilter(Intent.ACTION_USER_PRESENT);
+        screen.addAction(Intent.ACTION_SCREEN_OFF);
+        screen.addAction(Intent.ACTION_SCREEN_ON);
+        context.registerReceiver(new BroadcastReceiver() {
+            @Override public void onReceive(Context ignored, Intent intent) {
+                if (filterIcons && reduceActive && lockScreenOnly) publishIconFilter(false);
+            }
+        }, screen, null, handler, Context.RECEIVER_NOT_EXPORTED);
+        if (keyguardManager != null) {
+            try {
+                keyguardManager.addKeyguardLockedStateListener(handler::post, locked -> {
+                    if (lockScreenOnly) onNotificationListChanged();
+                });
+            } catch (RuntimeException error) {
+                Log.w(TAG, "Keyguard listener unavailable, using screen broadcasts", error);
+            }
+        }
     }
 
     /** Called on the worker handler whenever AsyncConfig loads or refreshes. */
@@ -366,6 +459,12 @@ final class ReduceInterruptionsController {
 
         boolean lockOnlyChanged = (targetLockOnly != lockScreenOnly);
         lockScreenOnly = targetLockOnly;
+        boolean nextFilter = settings.getBoolean(Config.KEY_REDUCE_FILTER_ICONS, Config.DEFAULT_REDUCE_FILTER_ICONS);
+        boolean iconsChanged = filterIcons != nextFilter;
+        filterIcons = nextFilter;
+        boolean nextSounds = settings.getBoolean(Config.KEY_REDUCE_NORMAL_SOUNDS, false);
+        boolean soundsChanged = normalSounds != nextSounds;
+        normalSounds = nextSounds;
 
         if (!configInitialized) {
             configInitialized = true;
@@ -374,6 +473,7 @@ final class ReduceInterruptionsController {
                 // Re-attach cleanly after reboot / soft-restart if ZenMode is already active.
                 snapshotExistingNotifications();
                 reduceActive = true;
+                scheduleReduceDeadline(adoptNativeRemainDeadline());
                 safeApplyRestrictions();
                 broadcastState(currentZen);
             } else if (targetEnabled) {
@@ -389,9 +489,12 @@ final class ReduceInterruptionsController {
         }
 
         if (targetEnabled != reduceActive) {
-            applyMode(targetEnabled ? ReduceInterruptions.MODE_REDUCE : ReduceInterruptions.MODE_OFF, false);
-        } else if (lockOnlyChanged && reduceActive) {
+            applyMode(targetEnabled ? ReduceInterruptions.MODE_REDUCE : ReduceInterruptions.MODE_OFF,
+                    false, KEEP_DURATION);
+        } else if ((lockOnlyChanged || soundsChanged) && reduceActive) {
             safeApplyRestrictions();
+            broadcastState(safeGetZenMode());
+        } else if (iconsChanged) {
             broadcastState(safeGetZenMode());
         }
     }
@@ -400,73 +503,114 @@ final class ReduceInterruptionsController {
         if (reduceActive && zenMode != ZEN_MODE_IMPORTANT_INTERRUPTIONS) {
             Log.i(TAG, "System ZenMode changed externally to " + zenMode + "; exiting Reduce Interruptions");
             deactivateStateOnly();
+            if (normalSounds) safeApplyRestrictions();
             syncProviderStateAsync(false);
-            broadcastState(zenMode);
+            broadcastState(zenMode, true, zenMode == ZEN_MODE_OFF);
         } else {
             // Keep SystemUI / TileService aware of latest ZenMode even when Reduce is inactive.
             broadcastState(zenMode);
         }
     }
 
-    private void applyMode(int mode, boolean syncProvider) {
-        int targetZen;
+    private void applyMode(int mode, boolean syncProvider, int durationMinutes) {
         switch (mode) {
-            case ReduceInterruptions.MODE_REDUCE:
-                if (!reduceActive) {
+            case ReduceInterruptions.MODE_REDUCE: {
+                if (durationMinutes == 0 && !reduceActive) return;
+                boolean starting = !reduceActive;
+                if (starting) {
                     snapshotExistingNotifications();
                     pendingFingerprints.clear();
                     resolvedFingerprints.clear();
                     realertDeadlines.clear();
                     reduceActive = true;
                 }
-                // Notify SystemUI before ZenMode flips so the native DND tile & moon icon do not flash.
-                broadcastState(ZEN_MODE_IMPORTANT_INTERRUPTIONS);
-                targetZen = ZEN_MODE_IMPORTANT_INTERRUPTIONS;
-                if (safeGetZenMode() != targetZen) {
-                    setSystemZenMode(targetZen, "localai_reduce_on");
+                long deadline = durationMinutes < 0 ? adoptNativeRemainDeadline()
+                        : durationMinutes == 0 ? 0L
+                        : System.currentTimeMillis() + durationMinutes * 60_000L;
+                scheduleReduceDeadline(deadline);
+                // Publish ownership before changing the native Zen state.
+                broadcastState(ZEN_MODE_IMPORTANT_INTERRUPTIONS, starting, false);
+                if (durationMinutes >= 0) {
+                    Uri condition = durationMinutes > 0 ? nativeCountdownCondition(durationMinutes) : null;
+                    setSystemZenMode(ZEN_MODE_IMPORTANT_INTERRUPTIONS, condition, "localai_reduce_timer");
+                } else if (safeGetZenMode() != ZEN_MODE_IMPORTANT_INTERRUPTIONS) {
+                    if (!setZenViaSoundMode(true)) {
+                        setSystemZenMode(ZEN_MODE_IMPORTANT_INTERRUPTIONS, null, "localai_reduce_on");
+                    }
                 } else {
                     safeApplyRestrictions();
                 }
                 if (syncProvider) syncProviderStateAsync(true);
                 broadcastState(safeGetZenMode());
-                Log.i(TAG, "Reduce Interruptions enabled (lockScreenOnly=" + lockScreenOnly + ")");
+                Log.i(TAG, "Reduce Interruptions enabled (lockScreenOnly=" + lockScreenOnly
+                        + ", deadline=" + reduceDeadline + ")");
                 break;
+            }
 
             case ReduceInterruptions.MODE_STRICT_DND:
-                deactivateStateOnly();
-                targetZen = ZEN_MODE_IMPORTANT_INTERRUPTIONS;
-                if (safeGetZenMode() != targetZen) {
-                    setSystemZenMode(targetZen, "localai_switch_strict_dnd");
-                } else {
-                    safeApplyRestrictions();
-                }
-                if (syncProvider) syncProviderStateAsync(false);
-                broadcastState(safeGetZenMode());
-                Log.i(TAG, "Switched from Reduce Interruptions to traditional strict DND");
-                break;
-
             case ReduceInterruptions.MODE_OFF:
             default:
+                boolean ending = reduceActive;
                 deactivateStateOnly();
-                if (safeGetZenMode() != ZEN_MODE_OFF) {
-                    setSystemZenMode(ZEN_MODE_OFF, "localai_reduce_off");
+                if (mode == ReduceInterruptions.MODE_OFF) {
+                    boolean zenWasOn = safeGetZenMode() != ZEN_MODE_OFF;
+                    if (zenWasOn) {
+                        // SoundMode 关闭会同时清掉 MIUI 的原生倒计时存储。
+                        if (!setZenViaSoundMode(false)) {
+                            setSystemZenMode(ZEN_MODE_OFF, null, "localai_reduce_off");
+                        }
+                    }
+                    if (syncProvider) syncProviderStateAsync(false);
+                    broadcastState(safeGetZenMode(), ending, ending && zenWasOn);
+                    Log.i(TAG, "Reduce Interruptions disabled (no retroactive re-alerts)");
+                } else {
+                    // Always re-assert manual ZenMode WITHOUT a countdown condition so the
+                    // previous Reduce timer cannot silently end the new strict DND session.
+                    if (!setZenViaSoundMode(true)) {
+                        setSystemZenMode(ZEN_MODE_IMPORTANT_INTERRUPTIONS, null, "localai_switch_strict_dnd");
+                    }
+                    if (syncProvider) syncProviderStateAsync(false);
+                    broadcastState(safeGetZenMode(), ending, false);
+                    Log.i(TAG, "Switched from Reduce Interruptions to traditional strict DND");
                 }
-                if (syncProvider) syncProviderStateAsync(false);
-                broadcastState(safeGetZenMode());
-                Log.i(TAG, "Reduce Interruptions disabled (no retroactive re-alerts)");
                 break;
+
         }
     }
 
+    /**
+     * Stores the expiry (0 = untimed) and arms the fallback handler timer. The real
+     * countdown is owned by MIUI's native storage (ExtraNotificationManager /
+     * SoundMode.setZenModeForDuration), which ends ZenMode itself; the handler timer
+     * only guarantees Reduce exits even if that native path never fires.
+     */
+    private void scheduleReduceDeadline(long deadlineRtc) {
+        cancelFallbackDeadline();
+        reduceDeadline = deadlineRtc;
+        if (deadlineRtc > 0L) {
+            handler.postDelayed(deadlineExpiryRunnable,
+                    Math.max(1_000L, deadlineRtc - System.currentTimeMillis()));
+        }
+    }
+
+    private void cancelFallbackDeadline() {
+        handler.removeCallbacks(deadlineExpiryRunnable);
+    }
+
+
     private void deactivateStateOnly() {
         reduceActive = false;
+        reduceDeadline = 0L;
+        cancelFallbackDeadline();
         preExistingFingerprints.clear();
         pendingFingerprints.clear();
         resolvedFingerprints.clear();
         realertDeadlines.clear();
+        grantedIconVersions.clear();
     }
 
     private void snapshotExistingNotifications() {
+        grantedIconVersions.clear();
         preExistingFingerprints.clear();
         synchronized (lock) {
             try {
@@ -505,6 +649,56 @@ final class ReduceInterruptionsController {
         return reduceActive;
     }
 
+    void onNotificationListChanged() {
+        if (!filterIcons || !reduceActive || !iconRefreshPending.compareAndSet(false, true)) return;
+        handler.post(() -> {
+            iconRefreshPending.set(false);
+            publishIconFilter(false);
+        });
+    }
+
+    private void publishIconFilter(boolean force) {
+        Set<String> allowed = null;
+        if (filterIcons && isEffectiveNow()) {
+            allowed = new HashSet<>();
+            if (safeGetZenMode() == ZEN_MODE_IMPORTANT_INTERRUPTIONS) {
+                synchronized (lock) {
+                    try {
+                        for (Object record : recordsByKey.values()) {
+                            StatusBarNotification sbn = safeGetSbn(record);
+                            if (sbn == null) continue;
+                            String version = GroupSummaryData.versionPart(sbn);
+                            boolean vip = version.equals(grantedIconVersions.get(sbn.getKey()));
+                            if (vip || (nativeShouldIntercept != null
+                                    && Boolean.FALSE.equals(nativeShouldIntercept.invoke(zenModeHelper, record)))) {
+                                allowed.add(version);
+                            }
+                        }
+                    } catch (ReflectiveOperationException error) {
+                        Log.w(TAG, "Could not read native status icon exemptions", error);
+                    }
+                }
+            }
+        }
+        if (!force && java.util.Objects.equals(allowed, lastIconVersions)) return;
+        sendIconFilter(allowed);
+    }
+
+    private void sendIconFilter(Set<String> allowed) {
+        Intent update = new Intent(ReduceInterruptions.ACTION_ICON_FILTER)
+                .setPackage("com.android.systemui")
+                .addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY | Intent.FLAG_RECEIVER_FOREGROUND);
+        if (allowed != null) {
+            update.putStringArrayListExtra(ReduceInterruptions.EXTRA_ALLOWED_VERSIONS, new ArrayList<>(allowed));
+        }
+        try {
+            context.sendBroadcast(update, "android.permission.STATUS_BAR_SERVICE");
+            lastIconVersions = allowed;
+        } catch (RuntimeException error) {
+            Log.w(TAG, "Could not publish status icon filter", error);
+        }
+    }
+
     boolean isEffectiveNow() {
         return reduceActive && (!lockScreenOnly || isDeviceLockedOrScreenOff());
     }
@@ -523,6 +717,7 @@ final class ReduceInterruptionsController {
         pendingFingerprints.keySet().retainAll(activeKeys);
         resolvedFingerprints.keySet().retainAll(activeKeys);
         realertDeadlines.keySet().retainAll(activeKeys);
+        grantedIconVersions.keySet().retainAll(activeKeys);
     }
 
     /**
@@ -553,7 +748,7 @@ final class ReduceInterruptionsController {
 
         try {
             long seq = alertSeqGen.incrementAndGet();
-            ReduceInterruptions.markBreakthrough(sbn, fingerprint, seq);
+            ReduceInterruptions.markBreakthrough(sbn, seq);
             recordSetIntercepted.invoke(record, Boolean.FALSE);
             recordSetSuppressedVisualEffects.invoke(record, 0);
             realertDeadlines.put(key, SystemClock.elapsedRealtime() + REALERT_ALLOW_WINDOW_MS);
@@ -561,6 +756,8 @@ final class ReduceInterruptionsController {
             // Notify SystemUI WITHOUT forcing FLAG_ONLY_ALERT_ONCE so HeadsUpCoordinator
             // & AlertCoordinator execute native heads-up + sound/vibrate + lockscreen wake.
             notifyPosted.invoke(listeners, record, record);
+            grantedIconVersions.put(key, GroupSummaryData.versionPart(sbn));
+            onNotificationListChanged();
             Log.i(TAG, "Reduce Interruptions VIP breakthrough re-alert: " + key + " (seq=" + seq + ")");
         } catch (Throwable t) {
             Log.e(TAG, "Failed to re-alert VIP breakthrough notification: " + key, t);
@@ -588,7 +785,7 @@ final class ReduceInterruptionsController {
         }
     }
 
-    private void setSystemZenMode(int zenMode, String reason) {
+    private void setSystemZenMode(int zenMode, Uri condition, String reason) {
         long token = Binder.clearCallingIdentity();
         internalZenMutation.set(true);
         try {
@@ -601,7 +798,7 @@ final class ReduceInterruptionsController {
                     zenModeHelper,
                     user,
                     zenMode,
-                    null,
+                    condition,
                     ORIGIN_USER_IN_SYSTEMUI,
                     reason,
                     "com.localai.notif",
@@ -614,6 +811,57 @@ final class ReduceInterruptionsController {
             internalZenMutation.set(false);
             Binder.restoreCallingIdentity(token);
         }
+    }
+
+    /**
+     * MIUI 原生勿扰开关。优先走 Settings 的
+     * {@code android.provider.MiuiSettings$SoundMode.setZenModeOn(Context, boolean, String)},
+     * 与音量面板月亮/计时 pill 和设置页勿扰态完全同一存储;失败返回 false 由调用方退化。
+     */
+    private boolean setZenViaSoundMode(boolean on) {
+        long token = Binder.clearCallingIdentity();
+        try {
+            Class<?> soundMode = Class.forName("android.provider.MiuiSettings$SoundMode");
+            Method setZenModeOn = soundMode.getMethod(
+                    "setZenModeOn", Context.class, boolean.class, String.class);
+            setZenModeOn.invoke(null, context, on, "miui_manual");
+            safeApplyRestrictions();
+            return true;
+        } catch (Throwable t) {
+            Log.w(TAG, "SoundMode.setZenModeOn(" + on + ") unavailable, falling back", t);
+            return false;
+        } finally {
+            Binder.restoreCallingIdentity(token);
+        }
+    }
+
+    private Uri nativeCountdownCondition(int minutes) {
+        try {
+            Class<?> config = Class.forName("android.service.notification.ZenModeConfig");
+            Method toTimeCondition = config.getMethod(
+                    "toTimeCondition", Context.class, int.class, int.class, boolean.class);
+            int user = zenUserField != null ? zenUserField.getInt(zenModeHelper) : 0;
+            Condition condition = (Condition) toTimeCondition.invoke(null, context, minutes, user, true);
+            return condition.id;
+        } catch (ReflectiveOperationException e) {
+            Log.w(TAG, "Native Zen countdown unavailable", e);
+            return null;
+        }
+    }
+
+    /** Mirrors an existing native timer when upgrading strict DND or reattaching after startup. */
+    private long adoptNativeRemainDeadline() {
+        try {
+            Class<?> extra = Class.forName("android.app.ExtraNotificationManager");
+            Method getRemainTime = extra.getMethod("getRemainTime", Context.class);
+            long remain = ((Number) getRemainTime.invoke(null, context)).longValue();
+            if (remain > 0L) {
+                return System.currentTimeMillis() + remain;
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "ExtraNotificationManager.getRemainTime unavailable", t);
+        }
+        return 0L;
     }
 
     private static UserHandle userHandleOf(int userId) {
@@ -645,6 +893,7 @@ final class ReduceInterruptionsController {
         long token = Binder.clearCallingIdentity();
         try {
             zenApplyRestrictions.invoke(zenModeHelper);
+            if (refreshAudioStreams != null) refreshAudioStreams.invoke(audioService);
         } catch (Throwable t) {
             Log.w(TAG, "Failed to re-apply ZenMode restrictions", t);
         } finally {
@@ -662,6 +911,15 @@ final class ReduceInterruptionsController {
     }
 
     private void broadcastState(int zenMode) {
+        broadcastState(zenMode, false, false);
+    }
+
+    private void broadcastState(int zenMode, boolean announce, boolean suppressDndExit) {
+        broadcastState(zenMode, announce, suppressDndExit, false);
+    }
+
+    private void broadcastState(int zenMode, boolean announce, boolean suppressDndExit, boolean forceIconUpdate) {
+        publishIconFilter(forceIconUpdate);
         boolean active = reduceActive;
         boolean lockOnly = lockScreenOnly;
         UserHandle allUsers = userHandleAll();
@@ -669,10 +927,14 @@ final class ReduceInterruptionsController {
             try {
                 Intent intent = new Intent(ReduceInterruptions.ACTION_STATE_CHANGED)
                         .setPackage(pkg)
-                        .addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY)
+                        .addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY | Intent.FLAG_RECEIVER_FOREGROUND)
                         .putExtra(ReduceInterruptions.EXTRA_ACTIVE, active)
+                        .putExtra(Config.KEY_REDUCE_FILTER_ICONS, filterIcons)
                         .putExtra(ReduceInterruptions.EXTRA_LOCK_SCREEN_ONLY, lockOnly)
-                        .putExtra(ReduceInterruptions.EXTRA_ZEN_MODE, zenMode);
+                        .putExtra(ReduceInterruptions.EXTRA_ZEN_MODE, zenMode)
+                        .putExtra(ReduceInterruptions.EXTRA_DEADLINE, reduceDeadline)
+                        .putExtra(ReduceInterruptions.EXTRA_ANNOUNCE, announce)
+                        .putExtra(ReduceInterruptions.EXTRA_SUPPRESS_DND_EXIT, suppressDndExit);
                 if (allUsers != null) {
                     Method sendAsUser = Context.class.getMethod(
                             "sendBroadcastAsUser", Intent.class, UserHandle.class);

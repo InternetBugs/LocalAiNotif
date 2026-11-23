@@ -7,6 +7,8 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Bundle;
 import android.view.HapticFeedbackConstants;
@@ -35,6 +37,8 @@ public final class MainActivity extends Activity implements ModelDownloadManager
     private HyperSettingsUi.SwitchRowParts mPriorityRow;
     private HyperSettingsUi.SwitchRowParts mReduceRow;
     private HyperSettingsUi.SwitchRowParts mReduceLockOnlyRow;
+    private HyperSettingsUi.SwitchRowParts mReduceIconsRow;
+    private HyperSettingsUi.SwitchRowParts mReduceSoundsRow;
     private HyperSettingsUi.NavRowParts mReduceTileRow;
     private HyperSettingsUi.NavRowParts mModelRow;
     private HyperSettingsUi.SwitchRowParts mAlwaysLoadRow;
@@ -43,7 +47,6 @@ public final class MainActivity extends Activity implements ModelDownloadManager
     private boolean mSummaryBusy;
     private boolean mPriorityBusy;
     private boolean mReduceBusy;
-    private boolean mReduceLockOnlyBusy;
     private boolean mAlwaysLoadBusy;
     private boolean mEngineReceiverRegistered;
     private boolean mReduceReceiverRegistered;
@@ -68,7 +71,7 @@ public final class MainActivity extends Activity implements ModelDownloadManager
             if (!mReduceBusy) {
                 setReduceVisual(active, true);
             }
-            if (!mReduceLockOnlyBusy && mReduceLockOnlyRow != null) {
+            if (mReduceLockOnlyRow != null && mReduceLockOnlyRow.row.isClickable()) {
                 mReduceLockOnlyRow.toggle.setChecked(lockOnly, true);
             }
         }
@@ -100,7 +103,10 @@ public final class MainActivity extends Activity implements ModelDownloadManager
                 : Config.DEFAULT_ALWAYS_LOAD_MODEL;
 
         setContentView(buildContentView(
-                initialPriority, initialSummary, initialReduce, initialReduceLockOnly, initialAlwaysLoad));
+                initialPriority, initialSummary, initialReduce, initialReduceLockOnly,
+                savedInstanceState != null && savedInstanceState.getBoolean(Config.KEY_REDUCE_FILTER_ICONS),
+                savedInstanceState != null && savedInstanceState.getBoolean(Config.KEY_REDUCE_NORMAL_SOUNDS),
+                initialAlwaysLoad));
         refreshConfigFromProvider();
     }
 
@@ -163,6 +169,8 @@ public final class MainActivity extends Activity implements ModelDownloadManager
         if (mAlwaysLoadRow != null) {
             outState.putBoolean(STATE_ALWAYS_LOAD_MODEL, mAlwaysLoadRow.toggle.isChecked());
         }
+        outState.putBoolean(Config.KEY_REDUCE_FILTER_ICONS, mReduceIconsRow.toggle.isChecked());
+        outState.putBoolean(Config.KEY_REDUCE_NORMAL_SOUNDS, mReduceSoundsRow.toggle.isChecked());
     }
 
     @Override
@@ -179,9 +187,13 @@ public final class MainActivity extends Activity implements ModelDownloadManager
             boolean initialSummary,
             boolean initialReduce,
             boolean initialReduceLockOnly,
+            boolean initialReduceFilterIcons,
+            boolean initialReduceSounds,
             boolean initialAlwaysLoad) {
+        boolean fromSystemSettings = getIntent() != null
+                && getIntent().getBooleanExtra(Config.EXTRA_FROM_SYSTEM_SETTINGS, false);
         HyperSettingsUi.PageShell shell = HyperSettingsUi.buildPageShell(
-                this, mPalette, resolveAppTitle(), false);
+                this, mPalette, resolveAppTitle(), fromSystemSettings);
         LinearLayout content = shell.content;
 
         // 1. Section: AI 摘要 (preview + toggle + subpage unified inside one 18dp squircle card)
@@ -280,7 +292,7 @@ public final class MainActivity extends Activity implements ModelDownloadManager
                 this,
                 mPalette,
                 "减少干扰",
-                "开启系统勿扰，仅允许 AI 识别的重要通知响铃、震动和弹出横幅。",
+                "开启系统勿扰，由 AI 放行重要通知。",
                 initialReduce,
                 false,
                 false);
@@ -303,13 +315,36 @@ public final class MainActivity extends Activity implements ModelDownloadManager
                 false,
                 false);
         mReduceLockOnlyRow.row.setOnClickListener(view -> {
-            if (mReduceLockOnlyBusy) return;
             boolean target = !mReduceLockOnlyRow.toggle.isChecked();
             view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
             mReduceLockOnlyRow.toggle.setChecked(target, true);
-            saveReduceLockScreenOnly(target);
+            saveReduceOption(Config.KEY_REDUCE_LOCK_SCREEN_ONLY, target, mReduceLockOnlyRow);
         });
         reduceCard.addView(mReduceLockOnlyRow.row);
+        reduceCard.addView(HyperSettingsUi.createInsetDivider(this, mPalette));
+
+        mReduceIconsRow = HyperSettingsUi.createSwitchRow(this, mPalette,
+                "仅显示已放行通知的图标", "隐藏未放行的通知图标。模式图标在解锁时移到左侧首位，锁屏时显示在右侧。",
+                initialReduceFilterIcons, false, false);
+        mReduceIconsRow.row.setOnClickListener(view -> {
+            boolean target = !mReduceIconsRow.toggle.isChecked();
+            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+            mReduceIconsRow.toggle.setChecked(target, true);
+            saveReduceOption(Config.KEY_REDUCE_FILTER_ICONS, target, mReduceIconsRow);
+        });
+        reduceCard.addView(mReduceIconsRow.row);
+        reduceCard.addView(HyperSettingsUi.createInsetDivider(this, mPalette));
+
+        mReduceSoundsRow = HyperSettingsUi.createSwitchRow(this, mPalette,
+                "保留通知音和系统音效", "普通通知也可按原设置响铃，触摸等系统音效跟随手机设置。",
+                initialReduceSounds, false, false);
+        mReduceSoundsRow.row.setOnClickListener(view -> {
+            boolean target = !mReduceSoundsRow.toggle.isChecked();
+            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+            mReduceSoundsRow.toggle.setChecked(target, true);
+            saveReduceOption(Config.KEY_REDUCE_NORMAL_SOUNDS, target, mReduceSoundsRow);
+        });
+        reduceCard.addView(mReduceSoundsRow.row);
         reduceCard.addView(HyperSettingsUi.createInsetDivider(this, mPalette));
 
         mReduceTileRow = HyperSettingsUi.createNavRow(
@@ -360,7 +395,24 @@ public final class MainActivity extends Activity implements ModelDownloadManager
         modelCard.addView(mAlwaysLoadRow.row);
         content.addView(modelCard);
 
-        // 4. Footer guidance note
+        // 5. Section: 其他
+        content.addView(HyperSettingsUi.createSmallTitle(this, mPalette, "其他", 20));
+        LinearLayout otherCard = HyperSettingsUi.createGroupCard(this, mPalette, 0);
+        HyperSettingsUi.NavRowParts aboutRow = HyperSettingsUi.createNavRow(
+                this,
+                mPalette,
+                "关于",
+                null,
+                resolveVersionDisplay(),
+                false,
+                true,
+                true);
+        aboutRow.row.setOnClickListener(v ->
+                startActivity(new Intent(this, AboutActivity.class)));
+        otherCard.addView(aboutRow.row);
+        content.addView(otherCard);
+
+        // 6. Footer guidance note
         content.addView(HyperSettingsUi.createFooter(
                 this,
                 mPalette,
@@ -405,9 +457,9 @@ public final class MainActivity extends Activity implements ModelDownloadManager
                 ? mLastConfig.getBoolean(Config.KEY_MODEL_READY, false)
                 : ModelCatalog.isModelDirValid(new File(Config.DEFAULT_MODEL_PATH));
         if (!modelReady) {
-            mReduceRow.summary.setText("未下载模型，当前等同传统勿扰。下载模型后可智能放行重要通知。");
+            mReduceRow.summary.setText("使用系统勿扰规则。下载模型后可智能放行重要通知。");
         } else {
-            mReduceRow.summary.setText("开启系统勿扰，仅允许 AI 识别的重要通知响铃、震动和弹出横幅。");
+            mReduceRow.summary.setText("开启系统勿扰，由 AI 放行重要通知。");
         }
     }
 
@@ -588,14 +640,13 @@ public final class MainActivity extends Activity implements ModelDownloadManager
         }, "LocalAiNotif-save-reduce").start();
     }
 
-    private void saveReduceLockScreenOnly(boolean target) {
-        mReduceLockOnlyBusy = true;
-        if (mReduceLockOnlyRow != null) mReduceLockOnlyRow.row.setClickable(false);
+    private void saveReduceOption(String key, boolean target, HyperSettingsUi.SwitchRowParts row) {
+        row.row.setClickable(false);
         new Thread(() -> {
             Bundle result = null;
             try {
                 Bundle input = new Bundle();
-                input.putBoolean(Config.KEY_REDUCE_LOCK_SCREEN_ONLY, target);
+                input.putBoolean(key, target);
                 result = getContentResolver().call(PROVIDER, Config.METHOD_SET_CONFIG, null, input);
                 if (result != null && !"0".equals(result.getString("status"))) {
                     result = null;
@@ -605,18 +656,15 @@ public final class MainActivity extends Activity implements ModelDownloadManager
             Bundle finalResult = result;
             runOnUiThread(() -> {
                 if (isFinishing() || isDestroyed()) return;
-                mReduceLockOnlyBusy = false;
-                if (mReduceLockOnlyRow != null) mReduceLockOnlyRow.row.setClickable(true);
+                row.row.setClickable(true);
                 if (finalResult != null) {
-                    applyConfigBundle(finalResult, true);
+                    row.toggle.setChecked(finalResult.getBoolean(key, target), true);
                 } else {
-                    if (mReduceLockOnlyRow != null) {
-                        mReduceLockOnlyRow.toggle.setChecked(!target, true);
-                    }
-                    Toast.makeText(this, "无法保存减少干扰锁屏设置", Toast.LENGTH_SHORT).show();
+                    row.toggle.setChecked(!target, true);
+                    Toast.makeText(this, "无法保存减少干扰设置", Toast.LENGTH_SHORT).show();
                 }
             });
-        }, "LocalAiNotif-save-reduce-lock-only").start();
+        }, "LocalAiNotif-save-reduce-option").start();
     }
 
     private void applyConfigBundle(Bundle config, boolean animate) {
@@ -638,8 +686,15 @@ public final class MainActivity extends Activity implements ModelDownloadManager
         } else {
             renderReduceSubtitle();
         }
-        if (!mReduceLockOnlyBusy && mReduceLockOnlyRow != null) {
+        if (mReduceLockOnlyRow != null && mReduceLockOnlyRow.row.isClickable()) {
             mReduceLockOnlyRow.toggle.setChecked(reduceLockOnly, animate);
+        }
+        if (mReduceIconsRow.row.isClickable()) {
+            mReduceIconsRow.toggle.setChecked(config.getBoolean(
+                    Config.KEY_REDUCE_FILTER_ICONS, Config.DEFAULT_REDUCE_FILTER_ICONS), animate);
+        }
+        if (mReduceSoundsRow.row.isClickable()) {
+            mReduceSoundsRow.toggle.setChecked(config.getBoolean(Config.KEY_REDUCE_NORMAL_SOUNDS, false), animate);
         }
         if (!mAlwaysLoadBusy) {
             setAlwaysLoadVisual(alwaysLoad, animate);
@@ -764,6 +819,17 @@ public final class MainActivity extends Activity implements ModelDownloadManager
         }
         CharSequence label = getApplicationInfo().nonLocalizedLabel;
         return label != null && label.length() > 0 ? label.toString() : "端侧AI通知总结";
+    }
+
+    private String resolveVersionDisplay() {
+        try {
+            PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+            if (info.versionName != null && !info.versionName.isEmpty()) {
+                return "v" + info.versionName;
+            }
+        } catch (PackageManager.NameNotFoundException ignored) {
+        }
+        return "v1.0.0";
     }
 
     private int dp(float value) {

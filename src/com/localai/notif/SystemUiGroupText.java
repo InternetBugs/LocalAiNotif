@@ -3,12 +3,25 @@ package com.localai.notif;
 import android.animation.Animator;
 import android.animation.AnimatorListenerAdapter;
 import android.animation.TimeInterpolator;
+import android.animation.ValueAnimator;
 import android.content.Context;
 import android.content.res.Configuration;
+import android.graphics.Canvas;
+import android.graphics.LinearGradient;
+import android.graphics.Matrix;
+import android.graphics.Paint;
+import android.graphics.Path;
+import android.graphics.PorterDuff;
+import android.graphics.PorterDuffXfermode;
+import android.graphics.Shader;
 import android.graphics.Typeface;
 import android.os.Bundle;
+import android.os.SystemClock;
 import android.service.notification.StatusBarNotification;
+import android.text.SpannableStringBuilder;
+import android.text.Spanned;
 import android.text.TextUtils;
+import android.text.style.ReplacementSpan;
 import android.util.Log;
 import android.util.TypedValue;
 import android.view.Gravity;
@@ -17,21 +30,42 @@ import android.view.ViewGroup;
 import android.view.ViewParent;
 import android.view.animation.AccelerateInterpolator;
 import android.view.animation.DecelerateInterpolator;
+import android.view.animation.LinearInterpolator;
+import android.view.animation.PathInterpolator;
 import android.widget.TextView;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.WeakHashMap;
 
 /**
- * Renders one merged multi-line TextView over the collapsed single-line slots inside
- * NotificationChildrenContainer while keeping native child heights, card stack, clipping,
- * and expand/collapse transitions completely untouched.
+ * Renders the Nebula Aurora AI summary presentation over collapsed notification group slots inside
+ * NotificationChildrenContainer while keeping native card surfaces, heights, clipping, and
+ * priority frames completely untouched:
+ * <ul>
+ *   <li><b>Thinking Scanlight</b>: While local LLM inference is actively running ({@code inFlight}),
+ *       original single-line notifications remain 100% readable while a softly feathered, 14-degree
+ *       tilted Nebula Aurora scanlight wave glides over the text slot (after a 250ms debounce).</li>
+ *   <li><b>Wave Wash Reveal (~720ms)</b>: When a new or updated summary arrives, a soft Nebula
+ *       light wave sweeps across the text zone—smoothly dissolving the raw lines underneath while
+ *       illuminating and uncovering the new AI summary behind the wavefront.</li>
+ *   <li><b>Frameless Nebula Prefix &amp; Cool-Tinted Ink</b>: Inline self-drawn dual 4-point
+ *       Nebula sparkles + gradient SemiBold "AI 摘要" + 0.8dp fading vertical hairline, followed
+ *       by ~16% Nebula-tinted high-contrast body text auto-calibrated for dark/lockscreen vs light
+ *       shade cards.</li>
+ *   <li><b>Revisit Micro-Glint (~550ms)</b>: When an already-revealed summary re-enters visibility
+ *       after screen-off or shade close, a subtle sheen sweeps across the inline emblem only.</li>
+ *   <li><b>Expand/Collapse &amp; Drag Sync</b>: Soft scale-recede (1.0 -> 0.96) + fade on expand,
+ *       tactile badge glint (~350ms) on collapse return, and 1:1 finger-tracked scale &amp; sparkle
+ *       luminescence during drag gestures.</li>
+ * </ul>
  *
  * 本机核对(OS 4.0.3.0 / Android 17,2026-11-23):全部反射符号命中;
  * ExpandableNotificationRow.setIsSummaryWithChildren 在本机不存在(hookRow 循环按名过滤,天然跳过);
@@ -39,6 +73,10 @@ import java.util.WeakHashMap;
  */
 final class SystemUiGroupText {
     private static final String TAG = "LocalAiNotif";
+    private static final int MAX_REVEALED_CACHE = 64;
+    private static final long REVISIT_HIDDEN_DEBOUNCE_MS = 450L;
+    private static final long REVISIT_GLINT_COOLDOWN_MS = 1200L;
+    private static final float EXPAND_MIN_SCALE = 0.96f;
 
     private final ModuleMain module;
     private final Class<?> rowClass;
@@ -55,7 +93,6 @@ final class SystemUiGroupText {
     private final Method getMaxAllowedVisibleChildren;
     private final Method getHybridTextView;
     private final Method getHybridTitleView;
-    private final Method addImage;
     private final Method showMiuiStyle;
     private final Field sbnField;
     private final Field showingPublic;
@@ -72,11 +109,27 @@ final class SystemUiGroupText {
 
     private final WeakHashMap<ViewGroup, OverlayState> overlays = new WeakHashMap<>();
     private final Set<View> hiddenHybrids = Collections.newSetFromMap(new WeakHashMap<>());
+    private final Map<String, String> revealedSummaries = new LinkedHashMap<>(32, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, String> eldest) {
+            return size() > MAX_REVEALED_CACHE;
+        }
+    };
+
+    private enum Mode {
+        NONE,
+        THINKING,
+        SUMMARY
+    }
+
+    private record GroupState(Mode mode, String groupKey, String versionFp, String summaryText) {
+        static final GroupState NONE = new GroupState(Mode.NONE, null, null, null);
+    }
 
     static void install(ModuleMain module, ClassLoader loader) {
         try {
             new SystemUiGroupText(module, loader);
-            module.log(Log.INFO, TAG, "Hooked merged group summary view");
+            module.log(Log.INFO, TAG, "Hooked merged group summary view (Nebula Aurora)");
         } catch (Exception e) {
             module.log(Log.ERROR, TAG, "Failed to hook merged group summary view", e);
         }
@@ -123,14 +176,6 @@ final class SystemUiGroupText {
 
         getHybridTextView = ModuleMain.findMethod(hybridClass, "getTextView");
         getHybridTitleView = ModuleMain.findMethod(hybridClass, "getTitleView");
-
-        Method badgeMethod = null;
-        try {
-            Class<?> binderCompanion = loader.loadClass(
-                    "com.android.systemui.statusbar.notification.row.NotificationRowContentBinderInjectorImpl$Companion");
-            badgeMethod = ModuleMain.findMethod(binderCompanion, "addImage", Context.class, CharSequence.class);
-        } catch (Throwable ignored) {}
-        addImage = badgeMethod;
 
         Method miuiStyleMethod = null;
         try {
@@ -182,20 +227,23 @@ final class SystemUiGroupText {
                     if (children == null || children.isEmpty() || children.get(0) != row) return result;
                     ViewGroup container = (ViewGroup) getChildrenContainer.invoke(parent);
                     OverlayState state = container == null ? null : overlays.get(container);
-                    if (state == null || state.rawText == null) return result;
+                    if (state == null || state.mode == Mode.NONE) return result;
 
                     if (name.equals("setVisible")) {
                         boolean visible = (Boolean) chain.getArg(0);
-                        cancelAnimation(state);
-                        state.view.setTranslationY(0f);
+                        cancelExpandAnimation(state);
+                        resetRestTransform(state);
                         state.view.setAlpha(visible ? 1f : 0f);
                         state.view.setVisibility(visible ? View.VISIBLE : View.INVISIBLE);
+                        if (!visible) {
+                            state.view.cancelTransientVisuals();
+                        }
                     } else if (dragTransform) {
                         syncDrag(state, hybrid);
                     } else if (name.equals("transformTo")) {
-                        startFade(state, false);
+                        startExpandFade(state, false);
                     } else if (name.equals("transformFrom")) {
-                        startFade(state, true);
+                        startExpandFade(state, true);
                     }
                 } catch (Exception e) {
                     module.log(Log.ERROR, TAG, "Failed to sync hybrid transition", e);
@@ -300,27 +348,42 @@ final class SystemUiGroupText {
         return false;
     }
 
-    private String summaryFor(ViewGroup container, Object parent, List<?> children) throws Exception {
-        if (container == null || parent == null || children == null || children.size() < 2) return null;
-        if ((Boolean) showingAsLowPriority.invoke(container)) return null;
-        if (isBundle != null && (Boolean) isBundle.invoke(container)) return null;
+    private GroupState resolveState(ViewGroup container, Object parent, List<?> children) throws Exception {
+        if (container == null || parent == null || children == null || children.size() < 2) {
+            return GroupState.NONE;
+        }
+        if ((Boolean) showingAsLowPriority.invoke(container)) return GroupState.NONE;
+        if (isBundle != null && (Boolean) isBundle.invoke(container)) return GroupState.NONE;
         StatusBarNotification summary = sbn(parent);
-        if (summary == null) return null;
+        if (summary == null) return GroupState.NONE;
+
         Bundle extras = summary.getNotification().extras;
-        String text = extras.getString(GroupSummaryData.SUMMARY);
-        if (text == null || text.isBlank()) return null;
-        if (needsPublicView(parent, children)) return null;
+        String summaryText = extras.getString(GroupSummaryData.SUMMARY);
+        String summaryFp = extras.getString(GroupSummaryData.FINGERPRINT);
+        String thinkingFp = extras.getString(GroupSummaryData.SUMMARIZING_FP);
+        boolean hasSummaryCandidate = summaryText != null && !summaryText.isBlank() && summaryFp != null;
+        boolean hasThinkingCandidate = thinkingFp != null && !thinkingFp.isBlank();
+        if (!hasSummaryCandidate && !hasThinkingCandidate) return GroupState.NONE;
+        if (needsPublicView(parent, children)) return GroupState.NONE;
 
         boolean priorityGroup = PriorityNotification.isGroupSummary(summary);
         ArrayList<StatusBarNotification> active = new ArrayList<>(children.size());
         for (Object child : children) {
             StatusBarNotification notification = sbn(child);
-            if (notification == null || !summary.getGroupKey().equals(notification.getGroupKey())) return null;
-            if (priorityGroup && !PriorityNotification.isMarked(notification)) return null;
+            if (notification == null || !summary.getGroupKey().equals(notification.getGroupKey())) {
+                return GroupState.NONE;
+            }
+            if (priorityGroup && !PriorityNotification.isMarked(notification)) return GroupState.NONE;
             active.add(notification);
         }
-        return GroupSummaryData.fingerprint(active).equals(extras.getString(GroupSummaryData.FINGERPRINT))
-                ? text : null;
+        String currentFp = GroupSummaryData.versionFingerprint(active);
+        if (hasSummaryCandidate && currentFp.equals(summaryFp)) {
+            return new GroupState(Mode.SUMMARY, summary.getGroupKey(), currentFp, summaryText);
+        }
+        if (hasThinkingCandidate && currentFp.equals(thinkingFp)) {
+            return new GroupState(Mode.THINKING, summary.getGroupKey(), currentFp, null);
+        }
+        return GroupState.NONE;
     }
 
     private void update(Object parent) throws Exception {
@@ -334,8 +397,8 @@ final class SystemUiGroupText {
             return;
         }
 
-        String summaryText = summaryFor(container, parent, children);
-        if (summaryText == null) {
+        GroupState resolved = resolveState(container, parent, children);
+        if (resolved.mode == Mode.NONE) {
             clearOverlay(overlays.get(container), children);
             return;
         }
@@ -344,22 +407,75 @@ final class SystemUiGroupText {
         if (hybrid0 == null) return;
 
         int slots = Math.min(children.size(), maxCollapsedSlots(container));
-        for (int i = 0; i < children.size(); i++) {
-            View hybrid = (View) getSingleLine.invoke(children.get(i));
-            if (i < slots) hideSingleLine(hybrid);
-            else restoreSingleLine(hybrid);
+        OverlayState state = ensureOverlay(container);
+        state.mode = resolved.mode;
+        state.activeSlots = slots;
+
+        if (resolved.mode == Mode.THINKING) {
+            // Keep original single-line notifications completely readable underneath the scan wave.
+            for (int i = 0; i < children.size(); i++) {
+                restoreSingleLine((View) getSingleLine.invoke(children.get(i)));
+            }
+            state.rawText = null;
+            state.view.setText(null);
+            state.view.setContentDescription(null);
+
+            TextView refText = (TextView) getHybridTextView.invoke(hybrid0);
+            boolean darkSurface = detectDarkSurface(container, refText);
+            boolean visible = hybrid0.getVisibility() == View.VISIBLE;
+            state.view.enterThinkingMode(darkSurface, container.isShown() && visible);
+
+            if (!state.animating) {
+                resetRestTransform(state);
+                state.view.setAlpha(visible ? 1f : 0f);
+                state.view.setVisibility(visible ? View.VISIBLE : View.INVISIBLE);
+            }
+            layoutOrRequest(container, state);
+            return;
         }
 
-        OverlayState state = ensureOverlay(container);
-        syncStyleAndText(container, state, hybrid0, summaryText, slots);
+        // Mode.SUMMARY
+        String revealToken = resolved.versionFp + "#" + resolved.summaryText.hashCode();
+        boolean isFreshReveal = !revealToken.equals(revealedSummaries.get(resolved.groupKey));
+        revealedSummaries.put(resolved.groupKey, revealToken);
+
+        boolean canAnimateWash = isFreshReveal
+                && container.isShown()
+                && hybrid0.getVisibility() == View.VISIBLE
+                && ValueAnimator.areAnimatorsEnabled();
+
+        syncStyleAndText(container, state, hybrid0, resolved.summaryText, slots);
+
+        if (canAnimateWash) {
+            state.view.setWashProgressListener(p -> applyHybridWashAlpha(container, p));
+            state.view.startWaveWashReveal();
+            applyHybridWashAlpha(container, state.view.getWashProgress());
+        } else if (state.view.isWashAnimating()) {
+            applyHybridWashAlpha(container, state.view.getWashProgress());
+        } else {
+            if (isFreshReveal && !container.isShown()) {
+                state.wasVisibleOnScreen = false;
+                state.lastHiddenUptimeMs = SystemClock.uptimeMillis() - REVISIT_HIDDEN_DEBOUNCE_MS;
+            }
+            state.view.enterSteadySummaryMode();
+            for (int i = 0; i < children.size(); i++) {
+                View hybrid = (View) getSingleLine.invoke(children.get(i));
+                if (i < slots) hideSingleLine(hybrid);
+                else restoreSingleLine(hybrid);
+            }
+        }
 
         if (!state.animating) {
             boolean show = hybrid0.getVisibility() == View.VISIBLE;
-            state.view.setTranslationY(0f);
+            resetRestTransform(state);
             state.view.setAlpha(show ? 1f : 0f);
             state.view.setVisibility(show ? View.VISIBLE : View.INVISIBLE);
         }
 
+        layoutOrRequest(container, state);
+    }
+
+    private void layoutOrRequest(ViewGroup container, OverlayState state) throws Exception {
         if (container.getWidth() > 0) {
             measureOverlay(container, state, container.getWidth(), true);
             container.invalidate();
@@ -368,13 +484,56 @@ final class SystemUiGroupText {
         }
     }
 
+    private void applyHybridWashAlpha(ViewGroup container, float washProgress) {
+        try {
+            Object parent = containingRow.get(container);
+            if (parent == null) return;
+            List<?> children = (List<?>) getChildren.invoke(parent);
+            if (children == null || children.isEmpty()) return;
+            OverlayState state = overlays.get(container);
+            int slots = state != null && state.activeSlots > 0
+                    ? Math.min(children.size(), state.activeSlots)
+                    : Math.min(children.size(), maxCollapsedSlots(container));
+
+            // Raw lines smoothly dissolve away during the first 44% of the Wave Wash.
+            float rawAlpha = washProgress >= 0.44f
+                    ? 0f
+                    : Math.max(0f, Math.min(1f, 1f - washProgress / 0.44f));
+            for (int i = 0; i < children.size(); i++) {
+                View hybrid = (View) getSingleLine.invoke(children.get(i));
+                if (hybrid == null) continue;
+                if (i < slots) {
+                    hiddenHybrids.add(hybrid);
+                    if (Math.abs(hybrid.getAlpha() - rawAlpha) > 0.005f) {
+                        hybrid.setAlpha(rawAlpha);
+                    }
+                    if (hybrid.getImportantForAccessibility()
+                            != View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS) {
+                        hybrid.setImportantForAccessibility(
+                                View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+                    }
+                } else {
+                    restoreSingleLine(hybrid);
+                }
+            }
+        } catch (Exception e) {
+            module.log(Log.ERROR, TAG, "Failed to update hybrid alpha during wave wash", e);
+        }
+    }
+
     private void clearOverlay(OverlayState state, List<?> children) throws ReflectiveOperationException {
-        if (state != null && state.rawText != null) {
-            cancelAnimation(state);
+        if (state != null && (state.mode != Mode.NONE || state.rawText != null)) {
+            cancelExpandAnimation(state);
+            state.mode = Mode.NONE;
             state.rawText = null;
+            state.activeSlots = 0;
+            state.wasVisibleOnScreen = false;
+            state.view.resetAllVisuals();
+            resetRestTransform(state);
             state.view.setAlpha(0f);
             state.view.setVisibility(View.GONE);
             state.view.setText(null);
+            state.view.setContentDescription(null);
         }
         if (children != null) {
             for (Object child : children) restoreSingleLine((View) getSingleLine.invoke(child));
@@ -384,7 +543,7 @@ final class SystemUiGroupText {
     private OverlayState ensureOverlay(ViewGroup container) {
         OverlayState state = overlays.get(container);
         if (state != null && state.view.getParent() == container) return state;
-        TextView view = new TextView(container.getContext());
+        NebulaSummaryView view = new NebulaSummaryView(container.getContext());
         view.setClickable(false);
         view.setLongClickable(false);
         view.setFocusable(false);
@@ -393,29 +552,30 @@ final class SystemUiGroupText {
         view.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
         view.setTextDirection(View.TEXT_DIRECTION_LOCALE);
         float density = container.getResources().getDisplayMetrics().density;
-        view.setLineSpacing(Math.round(2f * density), 1f);
+        view.setLineSpacing(Math.round(2.4f * density), 1f);
         view.setVisibility(View.GONE);
         container.addView(view);
         OverlayState created = new OverlayState(view);
         container.getViewTreeObserver().addOnPreDrawListener(() -> {
-            if (created.rawText == null) return true;
+            if (created.mode == Mode.NONE) return true;
             List<?> children = null;
-            boolean canDrawSummary = false;
+            boolean canDraw = false;
             try {
                 Object parent = containingRow.get(container);
                 if (parent != null) {
                     children = (List<?>) getChildren.invoke(parent);
-                    canDrawSummary = children != null && children.size() >= 2
+                    canDraw = children != null && children.size() >= 2
                             && !needsPublicView(parent, children);
                 }
             } catch (Exception e) {
                 module.log(Log.ERROR, TAG, "Failed to check group summary privacy on pre-draw", e);
             }
             try {
-                if (!canDrawSummary) {
+                if (!canDraw) {
                     clearOverlay(created, children);
                 } else if (created.view.getVisibility() != View.GONE && container.getWidth() > 0) {
                     measureOverlay(container, created, container.getWidth(), true);
+                    syncRevisitVisibility(container, created);
                 }
             } catch (Exception e) {
                 module.log(Log.ERROR, TAG, "Failed to update group summary on pre-draw", e);
@@ -426,15 +586,61 @@ final class SystemUiGroupText {
         return created;
     }
 
+    private void syncRevisitVisibility(ViewGroup container, OverlayState state) {
+        boolean visibleNow = container.isShown()
+                && state.view.getVisibility() == View.VISIBLE
+                && state.view.getAlpha() >= 0.25f;
+        if (state.mode == Mode.THINKING) {
+            state.view.setThinkingVisible(visibleNow);
+            state.wasVisibleOnScreen = visibleNow;
+            return;
+        }
+        if (state.mode != Mode.SUMMARY) return;
+
+        if (!visibleNow) {
+            if (state.wasVisibleOnScreen) {
+                state.wasVisibleOnScreen = false;
+                state.lastHiddenUptimeMs = SystemClock.uptimeMillis();
+            }
+            if (!container.isShown()) {
+                state.view.cancelTransientVisuals();
+            }
+            return;
+        }
+
+        if (!state.wasVisibleOnScreen) {
+            state.wasVisibleOnScreen = true;
+            long now = SystemClock.uptimeMillis();
+            boolean wasHiddenLongEnough = state.lastHiddenUptimeMs > 0L
+                    && (now - state.lastHiddenUptimeMs) >= REVISIT_HIDDEN_DEBOUNCE_MS;
+            boolean outsideCooldown = (now - state.lastRevisitGlintMs) >= REVISIT_GLINT_COOLDOWN_MS;
+            if (wasHiddenLongEnough && outsideCooldown
+                    && !state.animating && !state.view.isWashAnimating()) {
+                state.lastRevisitGlintMs = now;
+                state.view.startBadgeGlint(550L, 0.72f);
+            }
+        }
+    }
+
+    private boolean detectDarkSurface(ViewGroup container, TextView refText) {
+        Configuration cfg = container.getResources().getConfiguration();
+        boolean fallbackNight = (cfg.uiMode & Configuration.UI_MODE_NIGHT_MASK)
+                == Configuration.UI_MODE_NIGHT_YES;
+        if (refText == null) return fallbackNight;
+        return NebulaSummaryVisuals.isDarkSurfaceFromInk(refText.getCurrentTextColor(), fallbackNight);
+    }
+
     private void syncStyleAndText(ViewGroup container, OverlayState state, View hybrid0,
             String summaryText, int maxLines) throws Exception {
         TextView refText = (TextView) getHybridTextView.invoke(hybrid0);
+        boolean darkSurface = detectDarkSurface(container, refText);
+        int baseInk = refText != null ? refText.getCurrentTextColor()
+                : (darkSurface ? 0xD9FFFFFF : 0xCC000000);
+        int tintedInk = NebulaSummaryVisuals.tintSummaryBodyColor(baseInk, darkSurface);
+
         if (refText != null) {
             if (state.view.getTextSize() != refText.getTextSize()) {
                 state.view.setTextSize(TypedValue.COMPLEX_UNIT_PX, refText.getTextSize());
-            }
-            if (refText.getTextColors() != null) {
-                state.view.setTextColor(refText.getTextColors());
             }
             if (state.view.getIncludeFontPadding() != refText.getIncludeFontPadding()) {
                 state.view.setIncludeFontPadding(refText.getIncludeFontPadding());
@@ -445,8 +651,11 @@ final class SystemUiGroupText {
                 state.view.setTypeface(upright);
             }
         }
+        if (state.view.getCurrentTextColor() != tintedInk) {
+            state.view.setTextColor(tintedInk);
+        }
         float density = container.getResources().getDisplayMetrics().density;
-        state.view.setLineSpacing(Math.round(2f * density), 1f);
+        state.view.setLineSpacing(Math.round(2.4f * density), 1f);
         if (state.view.getMaxLines() != maxLines) {
             state.view.setMaxLines(maxLines);
         }
@@ -454,22 +663,22 @@ final class SystemUiGroupText {
         Configuration cfg = container.getResources().getConfiguration();
         float fontScale = cfg.fontScale;
         int nightMask = cfg.uiMode & Configuration.UI_MODE_NIGHT_MASK;
-        if (!summaryText.equals(state.rawText) || state.fontScale != fontScale || state.nightMask != nightMask) {
+        float textSizePx = state.view.getTextSize();
+        boolean appearanceChanged = state.darkSurface != darkSurface
+                || state.fontScale != fontScale
+                || state.nightMask != nightMask
+                || Math.abs(state.textSizePx - textSizePx) > 0.5f;
+
+        if (!summaryText.equals(state.rawText) || appearanceChanged) {
             state.rawText = summaryText;
+            state.darkSurface = darkSurface;
             state.fontScale = fontScale;
             state.nightMask = nightMask;
-            state.view.setText(formatSummary(container.getContext(), summaryText));
+            state.textSizePx = textSizePx;
+            state.view.setDarkSurface(darkSurface);
+            state.view.setText(state.view.buildSummarySpannable(summaryText));
+            state.view.setContentDescription(NebulaSummaryVisuals.LABEL + "：" + summaryText);
         }
-    }
-
-    private CharSequence formatSummary(Context context, String text) {
-        if (addImage != null) {
-            try {
-                Object span = addImage.invoke(null, context, text);
-                if (span instanceof CharSequence cs) return cs;
-            } catch (Throwable ignored) {}
-        }
-        return "✨ " + text;
     }
 
     private void measureOverlay(ViewGroup container, OverlayState state, int containerWidth,
@@ -487,6 +696,14 @@ final class SystemUiGroupText {
                 || state.view.getRight() != rect[2] || state.view.getBottom() != rect[3])) {
             state.view.layout(rect[0], rect[1], rect[2], rect[3]);
         }
+        applyScalePivot(state.view, w, h);
+    }
+
+    private static void applyScalePivot(View view, int w, int h) {
+        if (w <= 0 || h <= 0) return;
+        boolean rtl = view.getLayoutDirection() == View.LAYOUT_DIRECTION_RTL;
+        view.setPivotX(rtl ? w * 0.88f : w * 0.12f);
+        view.setPivotY(h * 0.5f);
     }
 
     private int[] bounds(ViewGroup container, OverlayState state, int containerWidth) throws Exception {
@@ -568,33 +785,69 @@ final class SystemUiGroupText {
     }
 
     private void syncDrag(OverlayState state, View hybrid) throws Exception {
-        cancelAnimation(state);
+        cancelExpandAnimation(state);
+        if (state.view.isWashAnimating()) {
+            state.view.cancelTransientVisuals();
+        }
         TextView ref = activeInnerText(hybrid);
-        float alpha = ref != null ? ref.getAlpha() : 0f;
+        float alpha = ref != null ? Math.max(0f, Math.min(1f, ref.getAlpha())) : 0f;
         boolean visible = hybrid.getVisibility() == View.VISIBLE
                 && ref != null && ref.getVisibility() == View.VISIBLE && alpha > 0f;
         state.view.setVisibility(visible ? View.VISIBLE : View.INVISIBLE);
         state.view.setAlpha(alpha);
         state.view.setTranslationY(ref != null ? ref.getTranslationY() : 0f);
+        if (state.mode == Mode.SUMMARY && ValueAnimator.areAnimatorsEnabled()) {
+            applyScalePivot(state.view, state.view.getWidth(), state.view.getHeight());
+            float scale = EXPAND_MIN_SCALE + (1f - EXPAND_MIN_SCALE) * alpha;
+            state.view.setScaleX(scale);
+            state.view.setScaleY(scale);
+            state.view.setDragLuminescence(0.55f + 0.45f * alpha);
+        } else {
+            state.view.setScaleX(1f);
+            state.view.setScaleY(1f);
+            state.view.setDragLuminescence(1f);
+        }
     }
 
-    private void startFade(OverlayState state, boolean fadeIn) {
-        cancelAnimation(state);
+    private void startExpandFade(OverlayState state, boolean fadeIn) {
+        cancelExpandAnimation(state);
+        if (!fadeIn && state.view.isWashAnimating()) {
+            state.view.cancelTransientVisuals();
+        }
+        boolean animEnabled = ValueAnimator.areAnimatorsEnabled();
+        float density = state.view.getResources().getDisplayMetrics().density;
+        float tuckedTy = animEnabled && state.mode == Mode.SUMMARY ? -2.4f * density : 0f;
+        float tuckedScale = animEnabled && state.mode == Mode.SUMMARY ? EXPAND_MIN_SCALE : 1f;
+        applyScalePivot(state.view, state.view.getWidth(), state.view.getHeight());
+
         if (fadeIn) {
             if (state.view.getVisibility() != View.VISIBLE) {
                 state.view.setAlpha(0f);
+                state.view.setScaleX(tuckedScale);
+                state.view.setScaleY(tuckedScale);
+                state.view.setTranslationY(tuckedTy);
                 state.view.setVisibility(View.VISIBLE);
             }
         } else if (state.view.getVisibility() != View.VISIBLE) {
             state.view.setAlpha(0f);
             return;
         }
-        state.view.setTranslationY(0f);
+
+        if (!animEnabled) {
+            resetRestTransform(state);
+            state.view.setAlpha(fadeIn ? 1f : 0f);
+            state.view.setVisibility(fadeIn ? View.VISIBLE : View.INVISIBLE);
+            return;
+        }
+
         state.animating = true;
-        long duration = isMiuiStyle() ? 210L : 150L;
+        long duration = isMiuiStyle() ? (fadeIn ? 225L : 205L) : 155L;
         TimeInterpolator interpolator = fadeIn ? collapseInterpolator : expandInterpolator;
         state.view.animate()
                 .alpha(fadeIn ? 1f : 0f)
+                .scaleX(fadeIn ? 1f : tuckedScale)
+                .scaleY(fadeIn ? 1f : tuckedScale)
+                .translationY(fadeIn ? 0f : tuckedTy)
                 .setDuration(duration)
                 .setInterpolator(interpolator)
                 .setListener(new AnimatorListenerAdapter() {
@@ -611,20 +864,31 @@ final class SystemUiGroupText {
                         state.animating = false;
                         state.view.animate().setListener(null);
                         if (!canceled) {
+                            resetRestTransform(state);
                             state.view.setAlpha(fadeIn ? 1f : 0f);
                             state.view.setVisibility(fadeIn ? View.VISIBLE : View.INVISIBLE);
+                            if (fadeIn && state.mode == Mode.SUMMARY && !state.view.isWashAnimating()) {
+                                state.view.startBadgeGlint(350L, 0.58f);
+                            }
                         }
                     }
                 })
                 .start();
     }
 
-    private void cancelAnimation(OverlayState state) {
+    private void cancelExpandAnimation(OverlayState state) {
         if (state.animating) {
             state.animating = false;
             state.view.animate().setListener(null);
             state.view.animate().cancel();
         }
+    }
+
+    private static void resetRestTransform(OverlayState state) {
+        state.view.setTranslationY(0f);
+        state.view.setScaleX(1f);
+        state.view.setScaleY(1f);
+        state.view.setDragLuminescence(1f);
     }
 
     private boolean isMiuiStyle() {
@@ -654,17 +918,665 @@ final class SystemUiGroupText {
     }
 
     private static final class OverlayState {
-        final TextView view;
+        final NebulaSummaryView view;
+        Mode mode = Mode.NONE;
         String rawText;
+        boolean darkSurface;
         float fontScale;
+        float textSizePx;
         int nightMask = -1;
         int collapsedTop;
         int collapsedBottom;
         int cachedSlots;
+        int activeSlots;
         boolean animating;
+        boolean wasVisibleOnScreen;
+        long lastHiddenUptimeMs;
+        long lastRevisitGlintMs;
 
-        OverlayState(TextView view) {
+        OverlayState(NebulaSummaryView view) {
             this.view = view;
+        }
+    }
+
+    // ---------------------------------------------------------------- custom Nebula summary view
+
+    interface WashProgressListener {
+        void onWashProgress(float progress);
+    }
+
+    private static final class NebulaSummaryView extends TextView {
+        private static final long THINKING_DEBOUNCE_MS = 140L;
+        private static final long THINKING_FADE_IN_MS = 200L;
+        private static final long THINKING_CYCLE_MS = 1450L;
+        private static final long WAVE_WASH_DURATION_MS = 880L;
+
+        private static final PathInterpolator THINKING_EASE =
+                new PathInterpolator(0.38f, 0.0f, 0.22f, 1.0f);
+        private static final PathInterpolator WASH_EASE =
+                new PathInterpolator(0.32f, 0.0f, 0.22f, 1.0f);
+        private static final PathInterpolator GLINT_EASE =
+                new PathInterpolator(0.25f, 0.9f, 0.35f, 1.0f);
+
+        private final float density;
+        private final NebulaBadgeSpan badgeSpan;
+
+        private final Paint wavePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint maskPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint trailPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Matrix shaderMatrix = new Matrix();
+
+        private Shader scanWaveShader;
+        private float cachedWaveWidth;
+        private float cachedWaveHeight;
+        private boolean cachedWaveDark;
+
+        private LinearGradient revealMaskShader;
+        private float cachedMaskFeather;
+        private boolean cachedMaskRtl;
+
+        private LinearGradient textTrailShader;
+        private float cachedTrailWidth;
+        private boolean cachedTrailDark;
+
+        private boolean thinkingMode;
+        private boolean darkSurface = true;
+        private float dragLuminescence = 1f;
+
+        // Thinking scanlight state
+        private boolean thinkingDesiredVisible;
+        private boolean thinkingScheduled;
+        private float thinkingFadeAlpha;
+        private float thinkingPhase;
+        private ValueAnimator thinkingFadeAnimator;
+        private ValueAnimator thinkingScanAnimator;
+        private final Runnable startThinkingRunnable = this::beginThinkingVisuals;
+
+        // Wave Wash reveal state
+        private boolean washAnimating;
+        private float washProgress = 1f;
+        private ValueAnimator washAnimator;
+        private WashProgressListener washProgressListener;
+
+        // Badge micro-glint state (revisit / collapse return)
+        private float badgeGlintProgress = -1f;
+        private float badgeGlintIntensity;
+        private float sparkleBloom;
+        private ValueAnimator glintAnimator;
+
+        NebulaSummaryView(Context context) {
+            super(context);
+            density = context.getResources().getDisplayMetrics().density;
+            badgeSpan = new NebulaBadgeSpan(density);
+            wavePaint.setStyle(Paint.Style.FILL);
+            maskPaint.setStyle(Paint.Style.FILL);
+            maskPaint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.DST_IN));
+            trailPaint.setStyle(Paint.Style.FILL);
+            trailPaint.setXfermode(new PorterDuffXfermode(PorterDuff.Mode.SRC_ATOP));
+        }
+
+        void setDarkSurface(boolean dark) {
+            if (darkSurface != dark) {
+                darkSurface = dark;
+                badgeSpan.invalidateShaders();
+                scanWaveShader = null;
+                textTrailShader = null;
+                invalidate();
+            }
+        }
+
+        void setDragLuminescence(float value) {
+            float clamped = Math.max(0f, Math.min(1f, value));
+            if (Math.abs(dragLuminescence - clamped) > 0.005f) {
+                dragLuminescence = clamped;
+                invalidate();
+            }
+        }
+
+        void setWashProgressListener(WashProgressListener listener) {
+            washProgressListener = listener;
+        }
+
+        boolean isWashAnimating() {
+            return washAnimating;
+        }
+
+        float getWashProgress() {
+            return washProgress;
+        }
+
+        CharSequence buildSummarySpannable(String summaryText) {
+            SpannableStringBuilder ssb = new SpannableStringBuilder();
+            ssb.append('\uFFFC');
+            ssb.append(summaryText);
+            ssb.setSpan(badgeSpan, 0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            return ssb;
+        }
+
+        void enterThinkingMode(boolean dark, boolean visible) {
+            setDarkSurface(dark);
+            cancelWashAnimator();
+            cancelGlintAnimator();
+            thinkingMode = true;
+            thinkingDesiredVisible = visible;
+            if (!ValueAnimator.areAnimatorsEnabled() || !visible) {
+                stopThinkingAnimators();
+                invalidate();
+                return;
+            }
+            if (!thinkingScheduled && thinkingScanAnimator == null) {
+                thinkingScheduled = true;
+                removeCallbacks(startThinkingRunnable);
+                postDelayed(startThinkingRunnable, THINKING_DEBOUNCE_MS);
+            }
+            invalidate();
+        }
+
+        void setThinkingVisible(boolean visible) {
+            if (!thinkingMode) return;
+            thinkingDesiredVisible = visible;
+            if (!visible) {
+                stopThinkingAnimators();
+            } else if (ValueAnimator.areAnimatorsEnabled() && !thinkingScheduled && thinkingScanAnimator == null) {
+                thinkingScheduled = true;
+                removeCallbacks(startThinkingRunnable);
+                postDelayed(startThinkingRunnable, THINKING_DEBOUNCE_MS);
+            }
+        }
+
+        private void beginThinkingVisuals() {
+            thinkingScheduled = false;
+            if (!thinkingMode || !thinkingDesiredVisible || !isAttachedToWindow()
+                    || !ValueAnimator.areAnimatorsEnabled()) {
+                return;
+            }
+            if (thinkingFadeAnimator != null) thinkingFadeAnimator.cancel();
+            thinkingFadeAnimator = ValueAnimator.ofFloat(thinkingFadeAlpha, 1f);
+            thinkingFadeAnimator.setDuration(THINKING_FADE_IN_MS);
+            thinkingFadeAnimator.setInterpolator(WASH_EASE);
+            thinkingFadeAnimator.addUpdateListener(anim -> {
+                thinkingFadeAlpha = (float) anim.getAnimatedValue();
+                invalidate();
+            });
+            thinkingFadeAnimator.start();
+
+            if (thinkingScanAnimator != null && thinkingScanAnimator.isRunning()) return;
+            thinkingScanAnimator = ValueAnimator.ofFloat(0f, 1f);
+            thinkingScanAnimator.setDuration(THINKING_CYCLE_MS);
+            thinkingScanAnimator.setRepeatCount(ValueAnimator.INFINITE);
+            thinkingScanAnimator.setInterpolator(THINKING_EASE);
+            thinkingScanAnimator.addUpdateListener(anim -> {
+                thinkingPhase = (float) anim.getAnimatedValue();
+                invalidate();
+            });
+            thinkingScanAnimator.start();
+        }
+
+        void enterSteadySummaryMode() {
+            thinkingMode = false;
+            stopThinkingAnimators();
+            cancelWashAnimator();
+            washProgress = 1f;
+            invalidate();
+        }
+
+        void startWaveWashReveal() {
+            thinkingMode = false;
+            stopThinkingAnimators();
+            cancelGlintAnimator();
+            cancelWashAnimator();
+
+            if (!ValueAnimator.areAnimatorsEnabled() || !isAttachedToWindow()) {
+                washAnimating = false;
+                washProgress = 1f;
+                sparkleBloom = 0f;
+                badgeGlintProgress = -1f;
+                badgeGlintIntensity = 0f;
+                if (washProgressListener != null) washProgressListener.onWashProgress(1f);
+                invalidate();
+                return;
+            }
+
+            washAnimating = true;
+            washProgress = 0f;
+            washAnimator = ValueAnimator.ofFloat(0f, 1f);
+            washAnimator.setDuration(WAVE_WASH_DURATION_MS);
+            washAnimator.setInterpolator(WASH_EASE);
+            washAnimator.addUpdateListener(anim -> {
+                washProgress = (float) anim.getAnimatedValue();
+                // Sparkle blooms right as the wave sweeps across the inline emblem.
+                float badgeWindow = Math.min(1f, washProgress / 0.56f);
+                sparkleBloom = NebulaSummaryVisuals.smoothEnvelope(badgeWindow, 0.34f);
+                badgeGlintProgress = badgeWindow < 1f ? badgeWindow : -1f;
+                badgeGlintIntensity = sparkleBloom;
+                if (washProgressListener != null) {
+                    washProgressListener.onWashProgress(washProgress);
+                }
+                invalidate();
+            });
+            washAnimator.addListener(new AnimatorListenerAdapter() {
+                @Override
+                public void onAnimationEnd(Animator animation) {
+                    washAnimating = false;
+                    washProgress = 1f;
+                    sparkleBloom = 0f;
+                    badgeGlintProgress = -1f;
+                    badgeGlintIntensity = 0f;
+                    washAnimator = null;
+                    if (washProgressListener != null) {
+                        washProgressListener.onWashProgress(1f);
+                    }
+                    invalidate();
+                }
+            });
+            washAnimator.start();
+        }
+
+        void startBadgeGlint(long durationMs, float peakIntensity) {
+            if (thinkingMode || washAnimating || !ValueAnimator.areAnimatorsEnabled()
+                    || !isAttachedToWindow()) {
+                return;
+            }
+            cancelGlintAnimator();
+            glintAnimator = ValueAnimator.ofFloat(0f, 1f);
+            glintAnimator.setDuration(durationMs);
+            glintAnimator.setInterpolator(GLINT_EASE);
+            glintAnimator.addUpdateListener(anim -> {
+                float t = (float) anim.getAnimatedValue();
+                badgeGlintProgress = t;
+                float env = NebulaSummaryVisuals.smoothEnvelope(t, 0.30f);
+                badgeGlintIntensity = env * peakIntensity;
+                sparkleBloom = env * peakIntensity * 0.85f;
+                invalidate();
+            });
+            glintAnimator.addListener(new AnimatorListenerAdapter() {
+                @Override
+                public void onAnimationEnd(Animator animation) {
+                    badgeGlintProgress = -1f;
+                    badgeGlintIntensity = 0f;
+                    sparkleBloom = 0f;
+                    glintAnimator = null;
+                    invalidate();
+                }
+            });
+            glintAnimator.start();
+        }
+
+        void cancelTransientVisuals() {
+            stopThinkingAnimators();
+            cancelGlintAnimator();
+            if (washAnimating) {
+                cancelWashAnimator();
+                washProgress = 1f;
+                if (washProgressListener != null) washProgressListener.onWashProgress(1f);
+            }
+        }
+
+        void resetAllVisuals() {
+            thinkingMode = false;
+            thinkingDesiredVisible = false;
+            stopThinkingAnimators();
+            cancelWashAnimator();
+            cancelGlintAnimator();
+            washProgress = 1f;
+            dragLuminescence = 1f;
+            washProgressListener = null;
+        }
+
+        private void stopThinkingAnimators() {
+            thinkingScheduled = false;
+            removeCallbacks(startThinkingRunnable);
+            if (thinkingFadeAnimator != null) {
+                thinkingFadeAnimator.cancel();
+                thinkingFadeAnimator = null;
+            }
+            if (thinkingScanAnimator != null) {
+                thinkingScanAnimator.cancel();
+                thinkingScanAnimator = null;
+            }
+            thinkingFadeAlpha = 0f;
+            thinkingPhase = 0f;
+        }
+
+        private void cancelWashAnimator() {
+            if (washAnimator != null) {
+                washAnimator.cancel();
+                washAnimator = null;
+            }
+            washAnimating = false;
+            sparkleBloom = 0f;
+            badgeGlintProgress = -1f;
+            badgeGlintIntensity = 0f;
+        }
+
+        private void cancelGlintAnimator() {
+            if (glintAnimator != null) {
+                glintAnimator.cancel();
+                glintAnimator = null;
+            }
+            badgeGlintProgress = -1f;
+            badgeGlintIntensity = 0f;
+            sparkleBloom = 0f;
+        }
+
+        @Override
+        public void onVisibilityAggregated(boolean isVisible) {
+            super.onVisibilityAggregated(isVisible);
+            if (!isVisible) {
+                cancelTransientVisuals();
+            } else if (thinkingMode && thinkingDesiredVisible && ValueAnimator.areAnimatorsEnabled()
+                    && !thinkingScheduled && thinkingScanAnimator == null) {
+                thinkingScheduled = true;
+                removeCallbacks(startThinkingRunnable);
+                postDelayed(startThinkingRunnable, THINKING_DEBOUNCE_MS);
+            }
+        }
+
+        @Override
+        protected void onDetachedFromWindow() {
+            cancelTransientVisuals();
+            super.onDetachedFromWindow();
+        }
+
+        private void ensureWaveShader(float bandWidth, float height) {
+            if (scanWaveShader != null && cachedWaveDark == darkSurface
+                    && Math.abs(cachedWaveWidth - bandWidth) < 1f
+                    && Math.abs(cachedWaveHeight - height) < 1f) {
+                return;
+            }
+            cachedWaveWidth = bandWidth;
+            cachedWaveHeight = height;
+            cachedWaveDark = darkSurface;
+            scanWaveShader = NebulaSummaryVisuals.createFeatheredWaveShader(
+                    bandWidth, 0f, height, darkSurface);
+        }
+
+        private void ensureMaskShader(float feather, boolean rtl) {
+            if (revealMaskShader != null && cachedMaskRtl == rtl
+                    && Math.abs(cachedMaskFeather - feather) < 1f) {
+                return;
+            }
+            cachedMaskFeather = feather;
+            cachedMaskRtl = rtl;
+            if (rtl) {
+                revealMaskShader = new LinearGradient(
+                        0f, 0f, feather, 0f,
+                        0x00FFFFFF, 0xFFFFFFFF, Shader.TileMode.CLAMP);
+            } else {
+                revealMaskShader = new LinearGradient(
+                        0f, 0f, feather, 0f,
+                        0xFFFFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP);
+            }
+        }
+
+        private void ensureTextTrailShader(float trailW) {
+            if (textTrailShader != null && cachedTrailDark == darkSurface
+                    && Math.abs(cachedTrailWidth - trailW) < 1f) {
+                return;
+            }
+            cachedTrailWidth = trailW;
+            cachedTrailDark = darkSurface;
+            int[] colors = darkSurface
+                    ? new int[]{0x005CE1FF, 0x785CE1FF, 0xD8EDF6FF, 0x80A17DFF, 0x00A17DFF}
+                    : new int[]{0x000E99E6, 0x660E99E6, 0xC8256CEB, 0x706F4FF0, 0x006F4FF0};
+            textTrailShader = new LinearGradient(
+                    0f, 0f, Math.max(1f, trailW), 0f,
+                    colors, new float[]{0f, 0.24f, 0.52f, 0.78f, 1f}, Shader.TileMode.CLAMP);
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            float w = getWidth();
+            float h = getHeight();
+            if (w <= 0f || h <= 0f) return;
+
+            boolean rtl = getLayoutDirection() == LAYOUT_DIRECTION_RTL;
+
+            if (thinkingMode) {
+                if (thinkingFadeAlpha > 0.01f) {
+                    float bandW = Math.max(76f * density, w * 0.46f);
+                    ensureWaveShader(bandW, h);
+                    float travelStart = rtl ? (w + bandW * 0.40f) : (-bandW * 0.40f);
+                    float travelEnd = rtl ? (-bandW * 0.40f) : (w + bandW * 0.40f);
+                    float centerX = travelStart + (travelEnd - travelStart) * thinkingPhase;
+                    float edgeFade = NebulaSummaryVisuals.smoothEnvelope(thinkingPhase, 0.16f);
+                    float intensity = thinkingFadeAlpha * (0.48f + 0.52f * edgeFade)
+                            * (darkSurface ? 1.0f : 0.92f);
+                    NebulaSummaryVisuals.drawTiltedNebulaWave(
+                            canvas, 0f, 0f, w, h, centerX, bandW, intensity,
+                            darkSurface, scanWaveShader, shaderMatrix, wavePaint);
+                }
+                return;
+            }
+
+            badgeSpan.syncAnimationState(
+                    darkSurface, dragLuminescence, sparkleBloom,
+                    badgeGlintProgress, badgeGlintIntensity);
+
+            if (!washAnimating) {
+                super.onDraw(canvas);
+                return;
+            }
+
+            // Hero ~880ms Nebula Wave Wash Reveal scaled to actual text span
+            float contentSpan = w;
+            android.text.Layout layout = getLayout();
+            if (layout != null && layout.getLineCount() > 0) {
+                float maxLineW = 0f;
+                for (int i = 0; i < layout.getLineCount(); i++) {
+                    maxLineW = Math.max(maxLineW, layout.getLineWidth(i));
+                }
+                if (maxLineW > 0f) {
+                    contentSpan = Math.min(w, Math.max(w * 0.65f, maxLineW + 32f * density));
+                }
+            }
+            float feather = Math.max(40f * density, contentSpan * 0.28f);
+            float startX = rtl ? (w + feather * 0.35f) : (-feather * 0.35f);
+            float endX = rtl ? (w - contentSpan - feather * 1.15f) : (contentSpan + feather * 1.15f);
+            float waveX = startX + (endX - startX) * washProgress;
+            float waveEnvelope = NebulaSummaryVisuals.smoothEnvelope(washProgress, 0.24f);
+
+            int layer = canvas.saveLayer(0f, 0f, w, h, null);
+            super.onDraw(canvas);
+
+            // 1. Text-locked luminous Nebula highlight trailing right behind the wavefront
+            if (waveEnvelope > 0.01f) {
+                float trailW = Math.max(58f * density, contentSpan * 0.38f);
+                ensureTextTrailShader(trailW);
+                float trailLeft = rtl
+                        ? (waveX - trailW * 0.22f)
+                        : (waveX - trailW * 0.78f);
+                shaderMatrix.reset();
+                shaderMatrix.setTranslate(trailLeft, 0f);
+                textTrailShader.setLocalMatrix(shaderMatrix);
+                trailPaint.setShader(textTrailShader);
+                trailPaint.setAlpha(NebulaSummaryVisuals.clamp255(Math.round(255f * waveEnvelope)));
+                canvas.drawRect(0f, 0f, w, h, trailPaint);
+                trailPaint.setShader(null);
+            }
+
+            // 2. Soft feathered horizontal reveal mask uncovering text smoothly left-to-right
+            ensureMaskShader(feather, rtl);
+            float maskOriginX = rtl ? waveX : (waveX - feather);
+            shaderMatrix.reset();
+            shaderMatrix.setTranslate(maskOriginX, 0f);
+            revealMaskShader.setLocalMatrix(shaderMatrix);
+            maskPaint.setShader(revealMaskShader);
+            canvas.drawRect(0f, 0f, w, h, maskPaint);
+            maskPaint.setShader(null);
+
+            canvas.restoreToCount(layer);
+
+            // 3. Soft vertically-feathered 14-degree tilted Nebula wavefront ribbon
+            if (waveEnvelope > 0.01f) {
+                float bandW = Math.max(62f * density, contentSpan * 0.38f);
+                ensureWaveShader(bandW, h);
+                NebulaSummaryVisuals.drawTiltedNebulaWave(
+                        canvas, 0f, 0f, w, h, waveX, bandW,
+                        waveEnvelope * (darkSurface ? 1.0f : 0.94f),
+                        darkSurface, scanWaveShader, shaderMatrix, wavePaint);
+            }
+        }
+    }
+
+    /**
+     * Inline frameless Nebula Aurora prefix placed at index 0 of line 1:
+     * [Dual 4-point Nebula sparkles] + [Gradient SemiBold "AI 摘要"] + [0.8dp fading vertical hairline].
+     */
+    private static final class NebulaBadgeSpan extends ReplacementSpan {
+        private final float density;
+        private final Paint fillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint labelPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint glintLabelPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint hairlinePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Path sparklePath = new Path();
+        private final Matrix shaderMatrix = new Matrix();
+
+        private boolean darkSurface = true;
+        private float alphaScale = 1f;
+        private float sparkleBloom;
+        private float glintProgress = -1f;
+        private float glintIntensity;
+
+        private float cachedTextSize = Float.NaN;
+        private boolean cachedDark;
+        private float cachedPrimaryR;
+        private float cachedDualW;
+        private float cachedLabelW;
+        private LinearGradient sparkleShader;
+        private LinearGradient labelShader;
+        private LinearGradient glintShader;
+        private LinearGradient hairlineShader;
+        private float cachedHairlineHalfH;
+
+        NebulaBadgeSpan(float density) {
+            this.density = density;
+            Typeface semiBold = Typeface.create(Typeface.DEFAULT, 600, false);
+            fillPaint.setStyle(Paint.Style.FILL);
+            labelPaint.setTypeface(semiBold);
+            labelPaint.setLetterSpacing(0.015f);
+            glintLabelPaint.setTypeface(semiBold);
+            glintLabelPaint.setLetterSpacing(0.015f);
+            hairlinePaint.setStyle(Paint.Style.STROKE);
+            hairlinePaint.setStrokeCap(Paint.Cap.ROUND);
+            hairlinePaint.setStrokeWidth(Math.max(1f, 0.80f * density));
+        }
+
+        void syncAnimationState(boolean dark, float alpha, float bloom, float glintPos, float glintInt) {
+            if (darkSurface != dark) {
+                darkSurface = dark;
+                invalidateShaders();
+            }
+            alphaScale = alpha;
+            sparkleBloom = bloom;
+            glintProgress = glintPos;
+            glintIntensity = glintInt;
+        }
+
+        void invalidateShaders() {
+            sparkleShader = null;
+            labelShader = null;
+            glintShader = null;
+            hairlineShader = null;
+        }
+
+        private void ensureMetrics(Paint hostPaint) {
+            float ts = hostPaint.getTextSize();
+            if (Math.abs(ts - cachedTextSize) < 0.25f && cachedDark == darkSurface && labelShader != null) {
+                return;
+            }
+            cachedTextSize = ts;
+            cachedDark = darkSurface;
+            cachedPrimaryR = Math.max(4.4f * density, ts * 0.355f);
+            cachedDualW = NebulaSummaryVisuals.dualSparkleWidth(cachedPrimaryR);
+
+            float badgeTextSize = ts * 0.90f;
+            labelPaint.setTextSize(badgeTextSize);
+            glintLabelPaint.setTextSize(badgeTextSize);
+            cachedLabelW = labelPaint.measureText(NebulaSummaryVisuals.LABEL);
+
+            sparkleShader = NebulaSummaryVisuals.createDiagonalSparkleGradient(
+                    0f, -cachedPrimaryR, cachedDualW, cachedPrimaryR, darkSurface);
+            labelShader = NebulaSummaryVisuals.createHorizontalBadgeGradient(
+                    0f, cachedLabelW, darkSurface);
+            glintShader = NebulaSummaryVisuals.createGlintSheenGradient(
+                    Math.max(24f * density, cachedLabelW * 0.65f), darkSurface);
+            hairlineShader = null;
+        }
+
+        @Override
+        public int getSize(Paint paint, CharSequence text, int start, int end, Paint.FontMetricsInt fm) {
+            ensureMetrics(paint);
+            float gapAfterSparkle = 3.0f * density;
+            float gapBeforeHairline = 4.8f * density;
+            float hairlineW = Math.max(1f, 0.80f * density);
+            float gapAfterHairline = 5.0f * density;
+            return Math.round(cachedDualW + gapAfterSparkle + cachedLabelW
+                    + gapBeforeHairline + hairlineW + gapAfterHairline);
+        }
+
+        @Override
+        public void draw(Canvas canvas, CharSequence text, int start, int end,
+                float x, int top, int y, int bottom, Paint paint) {
+            ensureMetrics(paint);
+            if (alphaScale <= 0.01f) return;
+
+            Paint.FontMetrics hostFm = paint.getFontMetrics();
+            float capH = -hostFm.ascent * 0.72f;
+            float opticalMidY = y - capH * 0.5f;
+
+            // 1. Self-drawn Nebula Aurora dual 4-point sparkles
+            shaderMatrix.reset();
+            shaderMatrix.setTranslate(x, opticalMidY);
+            sparkleShader.setLocalMatrix(shaderMatrix);
+            NebulaSummaryVisuals.drawDualSparkle(
+                    canvas, x, opticalMidY, cachedPrimaryR, darkSurface,
+                    alphaScale, sparkleBloom, sparkleShader, fillPaint, sparklePath);
+
+            // 2. Frameless Nebula gradient SemiBold "AI 摘要"
+            float labelX = x + cachedDualW + 3.0f * density;
+            Paint.FontMetrics lfm = labelPaint.getFontMetrics();
+            float labelBaseline = opticalMidY - (lfm.ascent + lfm.descent) * 0.5f;
+
+            shaderMatrix.reset();
+            shaderMatrix.setTranslate(labelX, 0f);
+            labelShader.setLocalMatrix(shaderMatrix);
+            labelPaint.setShader(labelShader);
+            labelPaint.setAlpha(NebulaSummaryVisuals.clamp255(Math.round(255f * alphaScale)));
+            canvas.drawText(NebulaSummaryVisuals.LABEL, labelX, labelBaseline, labelPaint);
+            labelPaint.setShader(null);
+
+            // 3. Glyph-locked specular glint sweep across "AI 摘要" during wash / revisit / collapse
+            if (glintProgress >= 0f && glintIntensity > 0.01f) {
+                float sheenW = Math.max(24f * density, cachedLabelW * 0.65f);
+                float totalSpan = cachedDualW + 3.0f * density + cachedLabelW;
+                float sheenLeft = (x - sheenW) + (totalSpan + sheenW * 2f) * glintProgress;
+                shaderMatrix.reset();
+                shaderMatrix.setTranslate(sheenLeft, 0f);
+                glintShader.setLocalMatrix(shaderMatrix);
+                glintLabelPaint.setShader(glintShader);
+                glintLabelPaint.setAlpha(NebulaSummaryVisuals.clamp255(
+                        Math.round(255f * glintIntensity * alphaScale)));
+                canvas.drawText(NebulaSummaryVisuals.LABEL, labelX, labelBaseline, glintLabelPaint);
+                glintLabelPaint.setShader(null);
+            }
+
+            // 4. Feather-thin 0.8dp vertical fading Nebula hairline separator
+            float hairlineW = Math.max(1f, 0.80f * density);
+            float hx = labelX + cachedLabelW + 4.8f * density + hairlineW * 0.5f;
+            float halfH = capH * 0.50f;
+            if (hairlineShader == null || Math.abs(cachedHairlineHalfH - halfH) > 0.5f) {
+                cachedHairlineHalfH = halfH;
+                hairlineShader = NebulaSummaryVisuals.createHairlineGradient(-halfH, halfH, darkSurface);
+            }
+            shaderMatrix.reset();
+            shaderMatrix.setTranslate(0f, opticalMidY);
+            hairlineShader.setLocalMatrix(shaderMatrix);
+            hairlinePaint.setShader(hairlineShader);
+            float hairlineAlpha = Math.min(1f, (0.86f + 0.25f * sparkleBloom) * alphaScale);
+            hairlinePaint.setAlpha(NebulaSummaryVisuals.clamp255(Math.round(255f * hairlineAlpha)));
+            canvas.drawLine(hx, opticalMidY - halfH, hx, opticalMidY + halfH, hairlinePaint);
+            hairlinePaint.setShader(null);
         }
     }
 }

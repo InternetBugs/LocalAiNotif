@@ -24,12 +24,14 @@ public final class ModelKeepAliveService extends Service {
 
     @Override
     public IBinder onBind(Intent intent) {
+        InferenceProvider.markSystemServerActive();
         InferenceProvider.triggerPreloadIfEnabled();
         return mBinder;
     }
 
     @Override
     public void onRebind(Intent intent) {
+        InferenceProvider.markSystemServerActive();
         InferenceProvider.triggerPreloadIfEnabled();
     }
 

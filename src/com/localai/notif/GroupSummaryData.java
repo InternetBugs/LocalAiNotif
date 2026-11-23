@@ -18,6 +18,7 @@ final class GroupSummaryData {
     static final String ORIGINAL_TEXT = "localai.original_text";
     static final String SUMMARY = "localai.group_summary";
     static final String FINGERPRINT = "localai.group_fingerprint";
+    static final String SUMMARIZING_FP = "localai.group_summarizing_fp";
     static final int AI_FLAG = 0x10000000;
     static final int MAX_ITEMS = 10;
 
@@ -59,6 +60,18 @@ final class GroupSummaryData {
         ArrayList<String> items = new ArrayList<>(children.size());
         for (StatusBarNotification child : children) {
             items.add(child.getKey() + ":" + itemFingerprint(child));
+        }
+        return fingerprintParts(items);
+    }
+
+    static String versionPart(StatusBarNotification child) {
+        return child.getKey() + ":" + child.getPostTime();
+    }
+
+    static String versionFingerprint(List<StatusBarNotification> children) {
+        ArrayList<String> items = new ArrayList<>(children.size());
+        for (StatusBarNotification child : children) {
+            items.add(versionPart(child));
         }
         return fingerprintParts(items);
     }

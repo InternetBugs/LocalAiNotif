@@ -67,6 +67,7 @@ final class NotificationSummaries {
     private final SummaryScheduler scheduler;
     private final PriorityGroups priorityGroups;
     private final ReduceInterruptionsController reduceController;
+    private final String frameworkSummary;
     private final AtomicBoolean refreshPending = new AtomicBoolean();
     private volatile boolean priorityEnabled = Config.DEFAULT_PRIORITY_ENABLED;
     private boolean configReady;
@@ -122,6 +123,7 @@ final class NotificationSummaries {
         this.context = context;
         this.service = service;
         this.hyperService = hyperService;
+        this.frameworkSummary = formatFrameworkSummary(module);
         power = context.getSystemService(PowerManager.class);
         Class<?> nms = service.getClass();
         Class<?> record = loader.loadClass("com.android.server.notification.NotificationRecord");
@@ -163,13 +165,19 @@ final class NotificationSummaries {
         filter.addAction(android.content.Intent.ACTION_SCREEN_OFF);
         filter.addAction(android.content.Intent.ACTION_USER_UNLOCKED);
         filter.addAction(Config.ACTION_CONFIG_CHANGED);
+        filter.addAction(Config.ACTION_PING_SYSTEM_HOOK);
         context.registerReceiver(new android.content.BroadcastReceiver() {
             @Override
             public void onReceive(Context context, android.content.Intent intent) {
                 String action = intent.getAction();
-                if (Config.ACTION_CONFIG_CHANGED.equals(action)
+                if (Config.ACTION_PING_SYSTEM_HOOK.equals(action)) {
+                    reportHookActiveAsync();
+                } else if (Config.ACTION_CONFIG_CHANGED.equals(action)
                         || Intent.ACTION_USER_UNLOCKED.equals(action)) {
                     NotificationSummaries.this.config.refresh();
+                    if (Intent.ACTION_USER_UNLOCKED.equals(action)) {
+                        reportHookActiveAsync();
+                    }
                 } else {
                     refresh();
                 }
@@ -198,9 +206,46 @@ final class NotificationSummaries {
         }, new IntentFilter(NotificationPresentation.ACTION), "android.permission.STATUS_BAR_SERVICE",
                 handler, Context.RECEIVER_EXPORTED);
         handler.post(this.config::refresh);
+        reportHookActiveAsync();
+    }
+
+    private void reportHookActiveAsync() {
+        executor.execute(() -> {
+            try {
+                Bundle info = new Bundle();
+                info.putInt(Config.KEY_SYSTEM_HOOK_VERSION_CODE, Config.MODULE_VERSION_CODE);
+                info.putString(Config.KEY_SYSTEM_HOOK_FRAMEWORK, frameworkSummary);
+                context.getContentResolver().call(
+                        Uri.parse("content://" + Config.AUTHORITY),
+                        Config.METHOD_REPORT_HOOK_ACTIVE,
+                        "system",
+                        info);
+            } catch (Throwable ignored) {
+            }
+        });
+    }
+
+    private static String formatFrameworkSummary(ModuleMain module) {
+        try {
+            String name = module.getFrameworkName();
+            String ver = module.getFrameworkVersion();
+            int api = module.getApiVersion();
+            StringBuilder sb = new StringBuilder();
+            sb.append(name != null && !name.isEmpty() ? name.trim() : "LSPosed");
+            if (ver != null && !ver.isEmpty()) {
+                sb.append(' ').append(ver.trim());
+            }
+            if (api > 0) {
+                sb.append(" (API ").append(api).append(')');
+            }
+            return sb.toString();
+        } catch (Throwable ignored) {
+            return "LSPosed";
+        }
     }
 
     void refresh() {
+        if (reduceController != null) reduceController.onNotificationListChanged();
         if (refreshPending.compareAndSet(false, true)) {
             handler.postDelayed(() -> {
                 refreshPending.set(false);
@@ -390,10 +435,7 @@ final class NotificationSummaries {
                 if (eligible) {
                     String id = priorityGroup ? priorityBatchId(summary.sbn) : "g:" + group.getKey();
                     Batch batch = new Batch(id, summary, children,
-                            priorityGroup ? 0 : minimum, null);
-                    List<Entry> pendingClassify = unclassifiedItems(batch.requested, classifyEnabled, priorityGroup);
-                    batch = new Batch(id, summary, children,
-                            priorityGroup ? 0 : minimum, pendingClassify);
+                            priorityGroup ? 0 : minimum, classifyEnabled);
                     batches.add(batch);
                     liveGroups.add(batch.id);
                     if (priorityGroup) {
@@ -407,7 +449,7 @@ final class NotificationSummaries {
                                     && (!child.title.isBlank() || !child.text.isBlank())
                                     && !hasPriorityDecision(child)) {
                                 batches.add(new Batch("s:" + child.sbn.getKey(), null,
-                                        List.of(child), minimum, List.of(child)));
+                                        List.of(child), minimum, true));
                             }
                         }
                     }
@@ -416,24 +458,33 @@ final class NotificationSummaries {
                         cachedGroups.remove(batch.id);
                         cached = null;
                     }
-                    if (cached != null) setGroup(summary, batch.fingerprint, cached.summary);
-                    else if (!batch.fingerprint.equals(summary.sbn.getNotification().extras
-                            .getString(GroupSummaryData.FINGERPRINT))) clearGroup(summary);
+                    if (cached != null) {
+                        setGroup(summary, batch.versionFingerprint, cached.summary);
+                    } else {
+                        clearGroup(summary);
+                        if (!inFlight.contains(batch.id)) clearSummarizing(summary);
+                    }
                 } else {
-                    if (summary != null) clearGroup(summary);
+                    if (summary != null) {
+                        clearGroup(summary);
+                        clearSummarizing(summary);
+                    }
                     for (Entry child : children) {
                         if (classifyEnabled && child.eligible
                                 && (!child.title.isBlank() || !child.text.isBlank())
                                 && (child.sbn.getNotification().flags & GroupSummaryData.AI_FLAG) == 0
                                 && !hasPriorityDecision(child)) {
                             batches.add(new Batch("s:" + child.sbn.getKey(), null,
-                                    List.of(child), minimum, List.of(child)));
+                                    List.of(child), minimum, true));
                         }
                     }
                 }
             }
             for (Map.Entry<String, Entry> summary : summaries.entrySet()) {
-                if (!groups.containsKey(summary.getKey())) clearGroup(summary.getValue());
+                if (!groups.containsKey(summary.getKey())) {
+                    clearGroup(summary.getValue());
+                    clearSummarizing(summary.getValue());
+                }
             }
             Set<String> liveBatches = new HashSet<>();
             for (Batch batch : batches) liveBatches.add(batch.id);
@@ -462,8 +513,19 @@ final class NotificationSummaries {
         return GroupSummaryData.fingerprintParts(items);
     }
 
+    private static String groupVersionFingerprint(List<Entry> children) {
+        ArrayList<String> items = new ArrayList<>(children.size());
+        for (Entry child : children) items.add(GroupSummaryData.versionPart(child.sbn));
+        return GroupSummaryData.fingerprintParts(items);
+    }
+
     private int unsent(Batch batch) {
         if (inFlight.contains(batch.id) || batch.fingerprint.equals(attempted.get(batch.id))) return 0;
+        if (!reduceInFlight.isEmpty()) {
+            for (Entry entry : batch.toClassify) {
+                if (reduceInFlight.contains(entry.sbn.getKey() + ":" + entry.fingerprint)) return 0;
+            }
+        }
         if (batch.summary != null) {
             return batch.children.size();
         }
@@ -559,34 +621,35 @@ final class NotificationSummaries {
                 }
             } catch (Exception e) {
                 Log.e(TAG, "Failed to scan pending Reduce Interruptions notifications", e);
-                return;
             }
         }
         if (pendingEntries.isEmpty()) return;
 
-        Batch batch = new Batch("r:" + System.nanoTime(), null, pendingEntries, 0, pendingEntries);
         executor.execute(() -> {
-            Bundle classification = classify(batch.toClassify);
-            handler.post(() -> finishReduceClassification(batch, classification));
+            for (int start = 0; start < pendingEntries.size(); start += GroupSummaryData.MAX_ITEMS) {
+                int end = Math.min(start + GroupSummaryData.MAX_ITEMS, pendingEntries.size());
+                List<Entry> requested = pendingEntries.subList(start, end);
+                Bundle classification = classify(requested);
+                handler.post(() -> finishReduceClassification(requested, classification));
+            }
         });
     }
 
-    private void finishReduceClassification(Batch batch, Bundle classification) {
+    private void finishReduceClassification(List<Entry> items, Bundle classification) {
         boolean ok = classification != null && "0".equals(classification.getString("status"));
         ArrayList<String> classes = ok ? classification.getStringArrayList(PriorityNotification.CLASS_LIST) : null;
         ArrayList<String> vips = ok ? classification.getStringArrayList(PriorityNotification.VIP_LIST) : null;
         ArrayList<String> errors = ok ? classification.getStringArrayList(InferenceProvider.OUT_ERRORS) : null;
-        int count = batch.requested.size();
+        int count = items.size();
         boolean validShape = ok && classes != null && vips != null && errors != null
                 && classes.size() == count && vips.size() == count && errors.size() == count;
 
         synchronized (lock) {
-            try {
-                for (int index = 0; index < count; index++) {
-                    Entry requested = batch.requested.get(index);
-                    String key = requested.sbn.getKey();
-                    reduceInFlight.remove(key + ":" + requested.fingerprint);
-
+            for (int index = 0; index < count; index++) {
+                Entry requested = items.get(index);
+                String key = requested.sbn.getKey();
+                reduceInFlight.remove(key + ":" + requested.fingerprint);
+                try {
                     boolean itemClassified = validShape && "0".equals(errors.get(index));
                     boolean vip = itemClassified && PriorityNotification.isImportant(
                             classes.get(index), vips.get(index));
@@ -624,15 +687,18 @@ final class NotificationSummaries {
                                 sameContent ? record : null,
                                 sameContent ? sbn : null);
                     }
+                } catch (Exception e) {
+                    Log.e(TAG, "Failed to apply Reduce Interruptions classification", e);
                 }
-            } catch (Exception e) {
-                Log.e(TAG, "Failed to apply Reduce Interruptions classification", e);
             }
         }
         refresh();
     }
 
     private void request(Batch batch, boolean classifyEnabled) {
+        if (batch.summary != null) {
+            markSummarizing(batch);
+        }
         // Pass1:仅对尚未分类的条目做一次分类;已分类条目与重要通知组不再重复分类,避免耗时与模型抖动导致退出重要通知。
         Bundle classes = classifyEnabled && !batch.toClassify.isEmpty()
                 ? classify(batch.toClassify) : null;
@@ -795,13 +861,14 @@ final class NotificationSummaries {
                 if (requested.summary == null || groupSummary.isBlank()) return;
                 cachedGroups.put(requested.id, new CachedGroup(requested.fingerprint, groupSummary));
                 if (current != null) {
-                    setGroup(current.summary, current.fingerprint, groupSummary);
+                    setGroup(current.summary, current.versionFingerprint, groupSummary);
                     Log.i(TAG, "Applied group summary");
                 }
             }
         } catch (Exception e) {
             Log.e(TAG, "Failed to apply summary", e);
         } finally {
+            clearSummarizing(requested);
             inFlight.remove(requested.id);
             refresh();
         }
@@ -862,11 +929,13 @@ final class NotificationSummaries {
         return category instanceof String ? (String) category : "1_IM";
     }
 
-    private void setGroup(Entry entry, String fingerprint, String summary) throws Exception {
+    private void setGroup(Entry entry, String versionFingerprint, String summary) throws Exception {
         Bundle extras = entry.sbn.getNotification().extras;
-        if (fingerprint.equals(extras.getString(GroupSummaryData.FINGERPRINT))
+        boolean hadSummarizing = extras.containsKey(GroupSummaryData.SUMMARIZING_FP);
+        if (!hadSummarizing && versionFingerprint.equals(extras.getString(GroupSummaryData.FINGERPRINT))
                 && summary.equals(extras.getString(GroupSummaryData.SUMMARY))) return;
-        extras.putString(GroupSummaryData.FINGERPRINT, fingerprint);
+        extras.remove(GroupSummaryData.SUMMARIZING_FP);
+        extras.putString(GroupSummaryData.FINGERPRINT, versionFingerprint);
         extras.putString(GroupSummaryData.SUMMARY, summary);
         PriorityNotification.notifyUpdated(listeners, notifyPosted, entry.record, entry.sbn);
     }
@@ -878,6 +947,60 @@ final class NotificationSummaries {
         extras.remove(GroupSummaryData.FINGERPRINT);
         extras.remove(GroupSummaryData.SUMMARY);
         PriorityNotification.notifyUpdated(listeners, notifyPosted, entry.record, entry.sbn);
+    }
+
+    private void markSummarizing(Batch batch) {
+        if (batch == null || batch.summary == null) return;
+        String summaryKey = batch.summary.sbn.getKey();
+        synchronized (lock) {
+            try {
+                Object record = recordsByKey.get(summaryKey);
+                if (record == null) return;
+                StatusBarNotification sbn = (StatusBarNotification) getSbn.invoke(record);
+                if (sbn == null) return;
+                Bundle extras = sbn.getNotification().extras;
+                // Do not show thinking indicator if this exact version already has a finished summary.
+                String existingSummary = extras.getString(GroupSummaryData.SUMMARY);
+                if (existingSummary != null && !existingSummary.isBlank()
+                        && batch.versionFingerprint.equals(extras.getString(GroupSummaryData.FINGERPRINT))) {
+                    return;
+                }
+                if (batch.versionFingerprint.equals(extras.getString(GroupSummaryData.SUMMARIZING_FP))) return;
+                extras.putString(GroupSummaryData.SUMMARIZING_FP, batch.versionFingerprint);
+                PriorityNotification.notifyUpdated(listeners, notifyPosted, record, sbn);
+            } catch (Exception e) {
+                Log.w(TAG, "Failed to mark summarizing state", e);
+            }
+        }
+    }
+
+    private void clearSummarizing(Entry entry) throws Exception {
+        if (entry == null) return;
+        Bundle extras = entry.sbn.getNotification().extras;
+        if (!extras.containsKey(GroupSummaryData.SUMMARIZING_FP)) return;
+        extras.remove(GroupSummaryData.SUMMARIZING_FP);
+        PriorityNotification.notifyUpdated(listeners, notifyPosted, entry.record, entry.sbn);
+    }
+
+    private void clearSummarizing(Batch batch) {
+        if (batch == null || batch.summary == null) return;
+        String summaryKey = batch.summary.sbn.getKey();
+        synchronized (lock) {
+            try {
+                Object record = recordsByKey.get(summaryKey);
+                if (record == null) return;
+                StatusBarNotification sbn = (StatusBarNotification) getSbn.invoke(record);
+                if (sbn == null) return;
+                Bundle extras = sbn.getNotification().extras;
+                String currentFp = extras.getString(GroupSummaryData.SUMMARIZING_FP);
+                if (currentFp == null) return;
+                if (!batch.versionFingerprint.equals(currentFp) && inFlight.contains(batch.id)) return;
+                extras.remove(GroupSummaryData.SUMMARIZING_FP);
+                PriorityNotification.notifyUpdated(listeners, notifyPosted, record, sbn);
+            } catch (Exception e) {
+                Log.w(TAG, "Failed to clear summarizing state", e);
+            }
+        }
     }
 
     private static final class Entry {
@@ -898,23 +1021,25 @@ final class NotificationSummaries {
         }
     }
 
-    private static final class Batch {
+    private final class Batch {
         final String id;
         final Entry summary;
         final List<Entry> children;
         final List<Entry> requested;
         final List<Entry> toClassify;
         final String fingerprint;
+        final String versionFingerprint;
         final int minimum;
         final boolean priorityGroup;
 
-        Batch(String id, Entry summary, List<Entry> children, int minimum, List<Entry> toClassify) {
+        Batch(String id, Entry summary, List<Entry> children, int minimum, boolean classifyEnabled) {
             this.id = id;
             this.summary = summary;
             this.children = new ArrayList<>(children);
             this.minimum = minimum;
             priorityGroup = summary != null && PriorityNotification.isGroupSummary(summary.sbn);
             fingerprint = groupFingerprint(children);
+            versionFingerprint = groupVersionFingerprint(children);
             if (children.size() == 1) {
                 requested = this.children;
             } else {
@@ -923,7 +1048,7 @@ final class NotificationSummaries {
                 requested = new ArrayList<>(sorted.subList(
                         Math.max(0, sorted.size() - GroupSummaryData.MAX_ITEMS), sorted.size()));
             }
-            this.toClassify = toClassify == null ? List.of() : new ArrayList<>(toClassify);
+            toClassify = unclassifiedItems(requested, classifyEnabled, priorityGroup);
         }
     }
 

@@ -3,18 +3,19 @@
 # Windows Git Bash: SDK at D:/Android/Sdk; jar signing uses debug keystore.
 set -euo pipefail
 
-PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$(dirname "$0")" && cygpath -am .)"
 cd "$PROJECT_DIR"
-SDK_DIR="${ANDROID_SDK_ROOT:-/d/Android/Sdk}"
+SDK_DIR="$(cygpath -am "${ANDROID_SDK_ROOT:-/d/Android/Sdk}")"
 BUILD_TOOLS="$SDK_DIR/build-tools/35.0.0"
-ANDROID_JAR="${ANDROID_JAR:-$SDK_DIR/platforms/android-36/android.jar}"
+ANDROID_JAR="$(cygpath -am "${ANDROID_JAR:-$SDK_DIR/platforms/android-36/android.jar}")"
 LIBXPOSED_JAR="$PROJECT_DIR/libs/libxposed-api-102.jar"
 BUILD_DIR="$PROJECT_DIR/build"
 DIST_DIR="$PROJECT_DIR/dist"
 VERSION="$(sed -n 's/.*android:versionName="\([^"]*\)".*/\1/p' "$PROJECT_DIR/AndroidManifest.xml")"
 APK_NAME="LocalAiNotif-v${VERSION}"
 PY="${PYTHON:-/d/Python312/python.exe}"
-MNN_DIR="${MNN_DIR:-$HOME/tmp/MNN}"
+USERHOME="${HOME:-${USERPROFILE:-$PROJECT_DIR}}"
+MNN_DIR="$(cygpath -am "${MNN_DIR:-$USERHOME/tmp/MNN}")"
 NDK_DIR="${NDK_DIR:-$SDK_DIR/ndk/28.2.13676358}"
 NDK_POSIX="${NDK_POSIX:-$NDK_DIR}"
 CXX="$NDK_DIR/toolchains/llvm/prebuilt/windows-x86_64/bin/clang++.exe"
@@ -39,7 +40,7 @@ echo "[3/6] javac: compiling sources..."
 find src -name "*.java" > "$BUILD_DIR/sources.txt"
 javac --release 17 \
     -encoding UTF-8 \
-    -cp "$(cygpath -m "$ANDROID_JAR");$(cygpath -m "$LIBXPOSED_JAR")" \
+    -cp "$ANDROID_JAR;$LIBXPOSED_JAR" \
     -d "$BUILD_DIR/classes" \
     @"$BUILD_DIR/sources.txt" 2> "$BUILD_DIR/javac.err" || { cat "$BUILD_DIR/javac.err"; exit 1; }
 cat "$BUILD_DIR/javac.err"
@@ -97,8 +98,7 @@ EOF
 
 echo "[6/6] zipalign + sign..."
 "$BUILD_TOOLS/zipalign.exe" -f -P 16 4 "$BUILD_DIR/unsigned.unaligned.apk" "$BUILD_DIR/aligned.apk"
-USERHOME="${HOME:-${USERPROFILE:-$PWD}}"
-DEBUG_KEYSTORE="${DEBUG_KEYSTORE:-$USERHOME/.android/debug.keystore}"
+DEBUG_KEYSTORE="$(cygpath -am "${DEBUG_KEYSTORE:-$USERHOME/.android/debug.keystore}")"
 if [ ! -f "$DEBUG_KEYSTORE" ]; then
     mkdir -p "$(dirname "$DEBUG_KEYSTORE")"
     keytool -genkeypair -keystore "$DEBUG_KEYSTORE" -storepass android \

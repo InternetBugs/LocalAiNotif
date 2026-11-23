@@ -21,6 +21,9 @@ public final class Config {
     public static final boolean DEFAULT_REDUCE_ENABLED = false;
     public static final String KEY_REDUCE_LOCK_SCREEN_ONLY = "reduce_lock_screen_only";
     public static final boolean DEFAULT_REDUCE_LOCK_SCREEN_ONLY = false;
+    public static final String KEY_REDUCE_FILTER_ICONS = "reduce_filter_icons";
+    public static final boolean DEFAULT_REDUCE_FILTER_ICONS = false;
+    public static final String KEY_REDUCE_NORMAL_SOUNDS = "reduce_normal_sounds";
     static final String METHOD_SET_PRIORITY_ENABLED = "set_priority_enabled";
     static final String METHOD_SET_CONFIG = "set_config";
     static final String METHOD_SYNC_REDUCE_STATE = "sync_reduce_state";
@@ -44,10 +47,21 @@ public final class Config {
     public static final boolean DEFAULT_WIFI_ONLY_DOWNLOAD = true;
     public static final String KEY_ALWAYS_LOAD_MODEL = "always_load_model";
     public static final boolean DEFAULT_ALWAYS_LOAD_MODEL = false;
+    public static final String KEY_SHOW_IN_SYSTEM_SETTINGS = "show_in_system_settings";
+    public static final boolean DEFAULT_SHOW_IN_SYSTEM_SETTINGS = false;
+    public static final String EXTRA_FROM_SYSTEM_SETTINGS = "localai_from_system_settings";
+    public static final String LAUNCHER_ALIAS_CLASS = "com.localai.notif.MainActivityLauncher";
+    static final int MODULE_VERSION_CODE = 20;
     static final String KEY_MODEL_READY = "model_ready";
     static final String KEY_ENGINE_LOADED = "engine_loaded";
     static final String KEY_ENGINE_LOADING = "engine_loading";
+    static final String KEY_SYSTEM_HOOK_ACTIVE = "system_hook_active";
+    static final String KEY_SYSTEM_HOOK_VERSION_CODE = "system_hook_version_code";
+    static final String KEY_SYSTEM_HOOK_FRAMEWORK = "system_hook_framework";
     static final String KEY_RESET_PRELOAD = "preload";
+    static final String METHOD_REPORT_HOOK_ACTIVE = "report_hook_active";
+    public static final String ACTION_PING_SYSTEM_HOOK = "com.localai.notif.PING_SYSTEM_HOOK";
+    static final String ACTION_HOOK_STATE_CHANGED = "com.localai.notif.HOOK_STATE_CHANGED";
     static final String ACTION_ENGINE_STATE_CHANGED = "com.localai.notif.ENGINE_STATE_CHANGED";
 
     public static final int DEFAULT_MIN_LENGTH = 15;

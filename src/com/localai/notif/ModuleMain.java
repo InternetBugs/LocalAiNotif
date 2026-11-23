@@ -39,8 +39,27 @@ public final class ModuleMain extends XposedModule {
             SystemUiGroupText.install(this, param.getDefaultClassLoader());
             SystemUiPrioritySection.install(this, param.getDefaultClassLoader());
             SystemUiReduceInterruptions.install(this, param.getDefaultClassLoader());
+            SystemUiReduceIsland.install(this, param.getDefaultClassLoader());
         } else if ("com.android.settings".equals(pkg)) {
             hookSettings(param.getDefaultClassLoader());
+            SettingsEntryHook.install(this, param.getDefaultClassLoader());
+        } else if ("com.localai.notif".equals(pkg)) {
+            hookSelfStatus(param.getDefaultClassLoader());
+        }
+    }
+
+    private void hookSelfStatus(ClassLoader cl) {
+        try {
+            Class<?> statusClass = cl.loadClass("com.localai.notif.ModuleStatus");
+            Method mark = statusClass.getDeclaredMethod(
+                    "markActivated", String.class, String.class, int.class);
+            mark.setAccessible(true);
+            mark.invoke(null, getFrameworkName(), getFrameworkVersion(), getApiVersion());
+            log(Log.INFO, TAG, "Marked module self-status active ("
+                    + getFrameworkName() + " " + getFrameworkVersion()
+                    + ", API " + getApiVersion() + ")");
+        } catch (Throwable t) {
+            log(Log.ERROR, TAG, "Failed to mark module self-status", t);
         }
     }
 
@@ -61,6 +80,18 @@ public final class ModuleMain extends XposedModule {
                     "checkAndDownloadModel",
                     String.class, String.class, String.class, int.class, boolean.class, Context.class);
             hook(checkAndDownloadModel).intercept(chain -> null);
+
+            // isAiNotificationSettingOn(context) -> true: 模块不落盘 ai_notification_setting,
+            // 运行时把小米的端侧总结开关虚构成开启;停用/卸载模块后系统设置保持原值。
+            Method isAiNotificationSettingOn =
+                    sysUtilsClass.getDeclaredMethod("isAiNotificationSettingOn", Context.class);
+            hook(isAiNotificationSettingOn).intercept(chain -> Boolean.TRUE);
+
+            // updateAiNotificationSetting(context, value) -> 不落盘: 设置页开关、账号登录
+            // 与模型下载回调都不再写系统设置,真实值保持用户原本状态。
+            Method updateAiNotificationSetting =
+                    sysUtilsClass.getDeclaredMethod("updateAiNotificationSetting", Context.class, int.class);
+            hook(updateAiNotificationSetting).intercept(chain -> null);
 
             log(Log.INFO, TAG, "Hooked com.miui.notification SystemUtils");
         } catch (Throwable t) {
@@ -87,9 +118,9 @@ public final class ModuleMain extends XposedModule {
             Class<?> listeners = cl.loadClass("com.android.server.notification.NotificationManagerService$NotificationListeners");
 
             hook(findMethod(hyper, "isHighPowerDevices")).intercept(chain -> Boolean.TRUE);
+            // 不改 Settings 的 ai_notification_setting: 运行时改写 mNotificationEnabled 即可,
+            // 模块停用/卸载后系统设置不留残留。
             hook(findMethod(hyper, "init", Context.class)).intercept(chain -> {
-                Context context = (Context) chain.getArg(0);
-                android.provider.Settings.System.putInt(context.getContentResolver(), "ai_notification_setting", 1);
                 Object result = chain.proceed();
                 sHyperNotifService = chain.getThisObject();
                 Field enabled = findField(hyper, "mNotificationEnabled");
