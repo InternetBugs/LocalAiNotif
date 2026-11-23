@@ -34,6 +34,7 @@ final class PrioritySectionFrame implements ViewTreeObserver.OnPreDrawListener {
     private View following;
     private int alpha;
     private float headingOffset;
+    private float headingOffsetX;
     private boolean boundsFailed;
 
     PrioritySectionFrame(View heading, View headingContents, Method getClipHeight, Method getClipTopAmount,
@@ -79,6 +80,7 @@ final class PrioritySectionFrame implements ViewTreeObserver.OnPreDrawListener {
         nextBounds.setEmpty();
         int nextAlpha = 0;
         float previousHeadingOffset = headingOffset;
+        float previousHeadingOffsetX = headingOffsetX;
         if (!boundsFailed && stack != null && !rows.isEmpty()) {
             try {
                 nextAlpha = updateBounds();
@@ -89,7 +91,8 @@ final class PrioritySectionFrame implements ViewTreeObserver.OnPreDrawListener {
         }
         if (nextAlpha == 0) nextBounds.setEmpty();
         if (stack != null && (!bounds.equals(nextBounds) || alpha != nextAlpha
-                || previousHeadingOffset != headingOffset)) {
+                || previousHeadingOffset != headingOffset
+                || previousHeadingOffsetX != headingOffsetX)) {
             if ((alpha == 0) != (nextAlpha == 0)) {
                 heading.setImportantForAccessibility(nextAlpha == 0
                         ? View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
@@ -124,16 +127,26 @@ final class PrioritySectionFrame implements ViewTreeObserver.OnPreDrawListener {
             cardAlpha = Math.max(cardAlpha, rowAlpha);
         }
         if (cardAlpha == 0f || headingAlpha <= 0f) return 0;
+        float headingLeft = nextBounds.left;
+        float headingRight = nextBounds.right;
+        boolean rtl = heading.getLayoutDirection() == View.LAYOUT_DIRECTION_RTL;
         headingOffset = Math.min(0f, firstCardTop - nextBounds.bottom - 2f * density);
+        headingOffsetX = rtl ? Math.min(0f, cardRight - headingRight) : Math.max(0f, cardLeft - headingLeft);
         nextBounds.offset(0f, headingOffset);
-        nextBounds.left = Math.min(nextBounds.left, cardLeft);
-        nextBounds.right = Math.max(nextBounds.right, cardRight);
+        nextBounds.left = cardLeft;
+        nextBounds.right = cardRight;
         headingContents.setAlpha(Math.min(1f, cardAlpha / headingAlpha));
 
         float frameBottom = lastCardBottom + 4f * density;
         if (getVisibleBounds(following, childBounds)) {
-            frameBottom = Math.min(frameBottom,
-                    Math.min(childBounds.top, (lastCardBottom + childBounds.top) / 2f));
+            if (childBounds.top >= lastCardBottom) {
+                frameBottom = Math.min(frameBottom, (lastCardBottom + childBounds.top) / 2f);
+            } else {
+                // HyperOS lockscreen stacked-card deck: the following normal card tucks behind
+                // the priority card (top < lastCardBottom). Hug the priority card's bottom rim
+                // without slicing through it or intruding on the peeking card's text.
+                frameBottom = lastCardBottom + 1.5f * density;
+            }
         }
         float horizontalPadding = 4f * density;
         float halfStroke = paint.getStrokeWidth() / 2f;
@@ -171,6 +184,10 @@ final class PrioritySectionFrame implements ViewTreeObserver.OnPreDrawListener {
 
     float headingOffset() {
         return headingOffset;
+    }
+
+    float headingOffsetX() {
+        return headingOffsetX;
     }
 
     void drawBackground(Canvas canvas) {

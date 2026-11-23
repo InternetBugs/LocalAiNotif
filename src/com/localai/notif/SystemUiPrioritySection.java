@@ -147,7 +147,7 @@ final class SystemUiPrioritySection {
             Canvas canvas = (Canvas) chain.getArg(0);
             int saved = canvas.save();
             try {
-                canvas.translate(0, frame.headingOffset());
+                canvas.translate(frame.headingOffsetX(), frame.headingOffset());
                 return chain.proceed();
             } finally {
                 canvas.restoreToCount(saved);
