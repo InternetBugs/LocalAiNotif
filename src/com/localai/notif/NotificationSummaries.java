@@ -464,15 +464,14 @@ final class NotificationSummaries {
 
     private int unsent(Batch batch) {
         if (inFlight.contains(batch.id) || batch.fingerprint.equals(attempted.get(batch.id))) return 0;
-        if (batch.priorityGroup) {
+        if (batch.summary != null) {
             return batch.children.size();
         }
         int count = 0;
         for (Entry child : batch.children) {
             if (!child.fingerprint.equals(submittedItems.get(child.sbn.getKey()))) count++;
         }
-        // A newly formed group also needs a summary when its children were summarized alone.
-        return count == 0 && !attempted.containsKey(batch.id) ? batch.children.size() : count;
+        return count;
     }
 
     private Runnable prepareDispatch(int threshold) {

@@ -110,6 +110,7 @@ public final class ModuleMain extends XposedModule {
             hook(findMethod(impl, "replaceNotification", record, boolean.class)).intercept(chain -> null);
             for (Method method : listeners.getDeclaredMethods()) {
                 if (!method.getName().equals("notifyPostedLocked")
+                        && !method.getName().equals("prepareNotifyPostedLocked")
                         && !method.getName().equals("notifyRemovedLocked")
                         && !method.getName().equals("notifyRankingUpdateLocked")) continue;
                 method.setAccessible(true);
