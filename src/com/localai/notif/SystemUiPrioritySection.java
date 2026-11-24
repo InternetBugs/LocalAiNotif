@@ -20,11 +20,14 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.FrameLayout;
 
+import io.github.libxposed.api.XposedInterface;
+
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -42,6 +45,7 @@ final class SystemUiPrioritySection {
     /** VisualStabilityCoordinator invalidate hook points for on-demand list refresh. */
     private Object stabilityManager;
     private Method stabilityInvalidate;
+    private int islandQuietCount;
     /** Reduce lockscreen pill header per rendered stack root. */
     private final Map<Object, ReducePill> reducePills = new WeakHashMap<>();
     private static final String NOTIFICATION = "com.android.systemui.statusbar.notification.";
@@ -239,6 +243,73 @@ final class SystemUiPrioritySection {
         } catch (ReflectiveOperationException e) {
             module.log(Log.WARN, TAG, "Failed to hook lockscreen reveal gesture", e);
         }
+        try {
+            hookIslandQuietFilter(module, loader, builder);
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            module.log(Log.WARN, TAG, "Could not connect to the keyguard island filter", e);
+        }
+    }
+
+    private void hookIslandQuietFilter(ModuleMain module, ClassLoader loader, Class<?> builder)
+            throws ReflectiveOperationException {
+        Class<?> keyguard = loader.loadClass(COORDINATOR + "KeyguardCoordinator$notifFilter$1");
+        Class<?> notifFilter = loader.loadClass(COLLECTION + "listbuilder.pluggable.NotifFilter");
+        Field finalizeFilters = requireField(builder, "mNotifFinalizeFilters");
+        Field parent = requireField(attachState.getType(), "parent");
+        Method filterList = requireMethod(builder, "filterNotifs", Collection.class, List.class, List.class);
+        Method keyguardCheck = requireMethod(keyguard, "shouldFilterOut", entryType, long.class);
+        Method filterCheck = requireMethod(notifFilter, "shouldFilterOut", entryType, long.class);
+
+        // ShadeListBuilder runs synchronously on the main thread. Retain its filters only for
+        // the finalize call, including an empty pass so an earlier reveal count cannot linger.
+        class FinalizePass {
+            List<?> filters;
+            int keyguardIndex;
+        }
+        FinalizePass pass = new FinalizePass();
+        module.hook(filterList).intercept(chain -> {
+            List<?> filters = (List<?>) chain.getArg(2);
+            if (filters != finalizeFilters.get(chain.getThisObject())) return chain.proceed();
+            islandQuietCount = 0;
+            if (!HyperMusicCoverDate.isModuleLoaded() || !SystemUiReduceInterruptions.lockQuietHiddenActive()) {
+                return chain.proceed();
+            }
+            for (int i = 0; i < filters.size(); i++) {
+                if (keyguard.isInstance(filters.get(i))) {
+                    pass.filters = filters;
+                    pass.keyguardIndex = i;
+                    break;
+                }
+            }
+            try {
+                return chain.proceed();
+            } finally {
+                pass.filters = null;
+            }
+        });
+        // HyperMusicCover's default-priority hook collects the result of proceed(). A quiet
+        // veto here therefore reaches both the island collector and the native keyguard list.
+        module.hook(keyguardCheck).setPriority(XposedInterface.PRIORITY_LOWEST).intercept(chain -> {
+            boolean hidden = (boolean) chain.proceed();
+            List<?> filters = pass.filters;
+            if (hidden || filters == null || chain.getThisObject() != filters.get(pass.keyguardIndex)) return hidden;
+            Object entry = chain.getArg(0);
+            StatusBarNotification item = (StatusBarNotification) sbn.get(entry);
+            if (SystemUiReduceInterruptions.isLockScreenImportant(item)) return false;
+
+            // Our veto stops the builder's loop. Run the remaining native predicates in order
+            // before counting: e.g. a screen-share secret must never enable the reveal gesture.
+            try {
+                for (int i = pass.keyguardIndex + 1; i < filters.size(); i++) {
+                    if ((boolean) filterCheck.invoke(filters.get(i), entry, chain.getArg(1))) return true;
+                }
+                Object owner = parent.get(attachState.get(entry));
+                if (!groupType.isInstance(owner) || groupSummary.get(owner) != entry) islandQuietCount++;
+            } catch (ReflectiveOperationException | RuntimeException e) {
+                module.log(Log.WARN, TAG, "Could not determine island reveal eligibility", e);
+            }
+            return true;
+        });
     }
 
     private void collectPresented(Object entry, Map<String, Long> versions) throws IllegalAccessException {
@@ -348,7 +419,7 @@ final class SystemUiPrioritySection {
      */
     private List<?> filterReduceQuiet(List<?> entries) throws IllegalAccessException {
         List<Object> pruned = null;
-        int hidden = 0;
+        int hidden = islandQuietCount;
         for (int index = 0; index < entries.size(); index++) {
             Object entry = entries.get(index);
             if (isReduceQuietHidden(entry)) {
@@ -430,8 +501,9 @@ final class SystemUiPrioritySection {
         contents.removeAllViews();
 
         ReducePill pill = new ReducePill();
-        pill.view = new ReduceLockPillView(context);
+        pill.view = new ReduceLockPillView(context, header);
         FrameLayout row = new FrameLayout(context);
+        row.setClipChildren(false);
         pill.view.setOnClickListener(view -> {
             if (SystemUiReduceInterruptions.lockQuietCount() > 0) {
                 SystemUiReduceInterruptions.requestLockReveal();
@@ -939,7 +1011,11 @@ final class SystemUiPrioritySection {
      * Static drawing (no animation, respects reduced-motion by design); translucent white
      * ink with an anti-halo shadow matches keyguard clock contrast on any wallpaper.
      */
-    static final class ReduceLockPillView extends View {
+    static final class ReduceLockPillView extends View implements android.view.ViewTreeObserver.OnPreDrawListener {
+        private final View header;
+        private final int[] location = new int[2];
+        private View mediaHeader;
+        private ReduceLockPillView coverLabel;
         private final Path logoPath = new Path();
         private final Paint logoPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -949,8 +1025,9 @@ final class SystemUiPrioritySection {
         private final float padTop;
         private final float padBottom;
 
-        ReduceLockPillView(Context context) {
+        ReduceLockPillView(Context context, View header) {
             super(context);
+            this.header = header;
             float density = context.getResources().getDisplayMetrics().density;
             String language = context.getResources().getConfiguration().getLocales().get(0).getLanguage();
             label = "zh".equals(language) ? "减少干扰" : "Reduce Interruptions";
@@ -971,6 +1048,63 @@ final class SystemUiPrioritySection {
             setClickable(false);
             setFocusable(false);
             setContentDescription(label);
+        }
+
+        @Override protected void onAttachedToWindow() {
+            super.onAttachedToWindow();
+            if (header != null) getViewTreeObserver().addOnPreDrawListener(this);
+        }
+
+        @Override protected void onDetachedFromWindow() {
+            if (header != null) getViewTreeObserver().removeOnPreDrawListener(this);
+            removeCoverLabel();
+            mediaHeader = null;
+            super.onDetachedFromWindow();
+        }
+
+        @Override public boolean onPreDraw() {
+            if (HyperMusicCoverDate.isModuleLoaded() && SystemUiReduceInterruptions.lockPillShowing()
+                    && header.getParent() instanceof ViewGroup stack && stack.getParent() instanceof ViewGroup host) {
+                if (mediaHeader == null || mediaHeader.getParent() != stack) {
+                    mediaHeader = null;
+                    for (int i = 0; i < stack.getChildCount(); i++) {
+                        View child = stack.getChildAt(i);
+                        if (child.getClass().getName().endsWith(".MiuiMediaHeaderView")) {
+                            mediaHeader = child;
+                            break;
+                        }
+                    }
+                }
+                if (mediaHeader != null && mediaHeader.isShown() && mediaHeader.getAlpha() > 0f
+                        && mediaHeader.getHeight() > 0 && stack.getAlpha() > 0f && getWidth() > 0) {
+                    // HyperMusicCover can clip the whole section header. Draw the same label in
+                    // the stack's parent so its visible and touch bounds both sit above the card.
+                    if (coverLabel == null || coverLabel.getParent() != host) {
+                        removeCoverLabel();
+                        coverLabel = new ReduceLockPillView(getContext(), null);
+                        coverLabel.setOnClickListener(v -> SystemUiReduceInterruptions.requestLockReveal());
+                        host.addView(coverLabel, getWidth(), getHeight());
+                    }
+                    mediaHeader.getLocationOnScreen(location);
+                    int x = location[0] + (mediaHeader.getWidth() - getWidth()) / 2;
+                    int y = location[1] - dp(getContext(), 12) - getHeight();
+                    host.getLocationOnScreen(location);
+                    coverLabel.setX(x - location[0]);
+                    coverLabel.setY(y - location[1]);
+                    coverLabel.setAlpha(mediaHeader.getAlpha() * stack.getAlpha());
+                    coverLabel.setClickable(isClickable());
+                    setVisibility(INVISIBLE);
+                    return true;
+                }
+            }
+            removeCoverLabel();
+            return true;
+        }
+
+        private void removeCoverLabel() {
+            if (coverLabel != null && coverLabel.getParent() instanceof ViewGroup parent) parent.removeView(coverLabel);
+            coverLabel = null;
+            if (getVisibility() != VISIBLE) setVisibility(VISIBLE);
         }
 
         @Override

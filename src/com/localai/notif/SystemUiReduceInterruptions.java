@@ -5,6 +5,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.media.session.MediaSession;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
@@ -821,6 +822,10 @@ final class SystemUiReduceInterruptions {
             return true;
         }
         if (notification.extras != null) {
+            // HyperMusicCover routes session notifications to its media surface, including custom templates.
+            if (notification.extras.getParcelable(Notification.EXTRA_MEDIA_SESSION, MediaSession.Token.class) != null) {
+                return true;
+            }
             String template = notification.extras.getString(Notification.EXTRA_TEMPLATE);
             if (template != null && template.contains("MediaStyle")) return true;
         }

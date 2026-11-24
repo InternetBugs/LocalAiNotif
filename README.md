@@ -21,6 +21,10 @@
 
 > 模块深度对接 HyperOS 4 原生通知框架（`HyperNotificationManagerService`、`MiuiSystemUI`、音量面板插件、小米超级岛、`MIUINotificationCenter` 与系统设置）。若在未测试版本中遇到不匹配的 Hook 项，模块会自动安全降级，不会导致系统崩溃，但部分视觉或交互特性可能不可用。
 
+**与 HyperMusicCover 联用**（按 v0.9.60 源码适配）：两个模块均在 LSPosed 的系统界面（SystemUI）作用域生效后，开启「减少干扰」会同时收起锁屏超级岛里的普通通知。系统允许在锁屏显示的重要通知、来电和导航继续按原规则展示。在锁屏空白处上滑可临时展开普通通知。
+
+锁屏音乐卡片出现时，「减少干扰」标记独立显示在卡片上方；卡片收起后，标记回到原来的锁屏位置。播放控件和封面手势仍由音乐挂面处理，使用媒体会话的自定义播放器通知也可放行。模式开启期间，日期旁的勿扰月牙暂时收起。[HyperMusicCover 项目](https://github.com/zyl6932/HyperMusicCover)
+
 ---
 
 ## 核心功能

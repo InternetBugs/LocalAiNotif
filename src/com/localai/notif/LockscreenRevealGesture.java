@@ -1,10 +1,12 @@
 package com.localai.notif;
 
+import android.graphics.Rect;
 import android.util.Log;
 import android.view.InputDevice;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewConfiguration;
+import android.view.ViewGroup;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -12,6 +14,7 @@ import java.util.WeakHashMap;
 
 import static com.localai.notif.SystemUiPrioritySection.requireField;
 import static com.localai.notif.SystemUiPrioritySection.requireMethod;
+import static io.github.libxposed.api.XposedInterface.PRIORITY_LOWEST;
 
 /** Owns the first upward touch on the keyguard while Reduce Interruptions has hidden rows. */
 final class LockscreenRevealGesture {
@@ -30,6 +33,8 @@ final class LockscreenRevealGesture {
     private final Method bouncerShowingOrPending;
     private final Field[] excludedStates;
     private final WeakHashMap<View, Swipe> swipes = new WeakHashMap<>();
+    private final Rect cardBounds = new Rect();
+    private int stackId = View.NO_ID;
 
     LockscreenRevealGesture(ModuleMain module, ClassLoader loader) throws ReflectiveOperationException {
         Class<?> window = loader.loadClass(SHADE + "NotificationShadeWindowView");
@@ -52,13 +57,16 @@ final class LockscreenRevealGesture {
         for (int i = 0; i < exclusions.length; i++) excludedStates[i] = requireField(state, exclusions[i]);
 
         Method dispatch = requireMethod(window, "dispatchTouchEvent", MotionEvent.class);
-        module.hook(dispatch).intercept(chain -> {
+        // LockTaps routes the pill, small island, stack and in-flight morphs from this same
+        // dispatch hook at default priority. Only arm when its real hit test passes DOWN on.
+        module.hook(dispatch).setPriority(PRIORITY_LOWEST).intercept(chain -> {
             View root = (View) chain.getThisObject();
             MotionEvent event = (MotionEvent) chain.getArg(0);
             int action = event.getActionMasked();
             if (action == MotionEvent.ACTION_DOWN) {
                 swipes.remove(root);
-                if (event.isFromSource(InputDevice.SOURCE_TOUCHSCREEN) && canReveal(root)) {
+                if (event.isFromSource(InputDevice.SOURCE_TOUCHSCREEN) && canReveal(root)
+                        && !onMediaHeader(root, event)) {
                     swipes.put(root, new Swipe(root, event));
                 }
                 boolean handled = (boolean) chain.proceed();
@@ -67,6 +75,11 @@ final class LockscreenRevealGesture {
             }
             Swipe swipe = swipes.get(root);
             if (swipe == null) return chain.proceed();
+            if (swipe.downTime != event.getDownTime()) {
+                // An outer hook may have consumed the previous UP and the next DOWN.
+                swipes.remove(root);
+                return chain.proceed();
+            }
             boolean ended = action == MotionEvent.ACTION_CANCEL || action == MotionEvent.ACTION_UP;
             if (ended) swipes.remove(root);
             if (swipe.claimed) return true;
@@ -96,6 +109,27 @@ final class LockscreenRevealGesture {
             SystemUiReduceInterruptions.requestLockReveal();
             return true;
         });
+    }
+
+    private boolean onMediaHeader(View root, MotionEvent down) {
+        if (stackId == View.NO_ID) {
+            stackId = root.getResources().getIdentifier("notification_stack_scroller", "id", "com.android.systemui");
+        }
+        if (stackId == 0) return false;
+        // The live native header is a stack child. Looking up mi_media_controls at the
+        // window instead can hit the status-bar island's copy of the card contents.
+        View stack = root.findViewById(stackId);
+        if (!(stack instanceof ViewGroup rows) || !rows.isShown() || rows.getAlpha() <= 0f) return false;
+        for (int i = 0; i < rows.getChildCount(); i++) {
+            View row = rows.getChildAt(i);
+            if (row.getVisibility() == View.VISIBLE && row.getAlpha() > 0f
+                    && row.getClass().getName().endsWith(".MiuiMediaHeaderView")
+                    && row.getGlobalVisibleRect(cardBounds)) {
+                // getGlobalVisibleRect uses the shade window's root coordinates.
+                return cardBounds.contains((int) down.getX(), (int) down.getY());
+            }
+        }
+        return false;
     }
 
     private boolean canReveal(View root) {
@@ -129,12 +163,14 @@ final class LockscreenRevealGesture {
     }
 
     private static final class Swipe {
+        final long downTime;
         final float downX;
         final float downY;
         final int slop;
         boolean claimed;
 
         Swipe(View root, MotionEvent down) {
+            downTime = down.getDownTime();
             downX = down.getX();
             downY = down.getY();
             slop = ViewConfiguration.get(root.getContext()).getScaledTouchSlop();
