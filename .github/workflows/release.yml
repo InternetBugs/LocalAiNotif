@@ -156,7 +156,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/MNN/project/android/build_local/libMNN.so
-          key: mnn-${{ env.MNN_COMMIT }}-${{ env.NDK_VERSION }}-htp-v79-${{ hashFiles('jni/MnnHexagon.cmake', 'jni/HexagonProjectionFactory.cpp') }}
+          key: mnn-${{ env.MNN_COMMIT }}-${{ env.NDK_VERSION }}-hexagon-vulkan-buffer-${{ hashFiles('jni/MnnHexagon.cmake', 'jni/HexagonProjectionFactory.cpp') }}
 
       - name: Build libMNN.so (arm64-v8a) on cache miss
         if: steps.mnn_cache.outputs.cache-hit != 'true'
@@ -184,6 +184,7 @@ jobs:
             -DMNN_BUILD_LLM=ON \
             -DMNN_HEXAGON=ON \
             -DMNN_HEXAGON_APP_POWER_HOLD=ON \
+            -DMNN_OPENCL=OFF -DMNN_VULKAN=ON -DMNN_VULKAN_IMAGE=OFF -DMNN_USE_SYSTEM_LIB=OFF \
             -DMNN_OPENMP=OFF \
             -DMNN_USE_THREAD_POOL=ON \
             -DMNN_KLEIDIAI=OFF \
@@ -311,12 +312,12 @@ jobs:
           import sys, zipfile
           with zipfile.ZipFile(sys.argv[1]) as z:
               names = set(z.namelist())
-          for req in ("lib/arm64-v8a/liblocalai_llm.so", "lib/arm64-v8a/libMNN.so", "lib/arm64-v8a/libc++_shared.so",
-                      "lib/arm64-v8a/libMNN_htpops.so", "lib/arm64-v8a/libMNN_htpops_skelV79.so"):
+          for req in ("lib/arm64-v8a/liblocalai_llm.so", "lib/arm64-v8a/libMNN.so", "lib/arm64-v8a/libc++_shared.so"):
               if req not in names:
                   sys.exit(f"ERROR: Missing required native library in APK: {req}")
           print("All required arm64-v8a libraries present.")
           EOF
+          python3 tools/hexagon/verify.py "$APK"
 
           echo "=== Verifying signature digest ==="
           VERIFY_OUT="$(java -jar "$APKSIGNER_JAR" verify -v --print-certs "$APK")"

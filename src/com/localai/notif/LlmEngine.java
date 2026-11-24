@@ -1,7 +1,6 @@
 package com.localai.notif;
 
 import android.content.Context;
-import android.os.Build;
 import android.system.Os;
 import android.util.Log;
 
@@ -10,6 +9,7 @@ import org.json.JSONObject;
 import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.util.Locale;
 
 /**
  * Thin Java face of jni/localai_llm_jni.cpp (MNN-LLM).
@@ -21,12 +21,14 @@ public final class LlmEngine implements AutoCloseable {
 
     private volatile long mPtr;
     private final byte[] mConfigPath;
-    private boolean mHexagon;
+    private final String[] mBackends;
+    private final File mCacheDir;
+    private int mNextBackend;
 
-    private LlmEngine(long ptr, byte[] configPath, boolean hexagon) {
-        mPtr = ptr;
+    private LlmEngine(byte[] configPath, String[] backends, File cacheDir) {
         mConfigPath = configPath;
-        mHexagon = hexagon;
+        mBackends = backends;
+        mCacheDir = cacheDir;
     }
 
     /** Loads the model at configPath (MNN llm config.json). Returns null on failure. */
@@ -36,20 +38,6 @@ public final class LlmEngine implements AutoCloseable {
 
     static LlmEngine create(Context context, String configPath) {
         File config = new File(configPath);
-        boolean requested = false;
-        boolean explicitHexagon = false;
-        if (context != null) {
-            try {
-                String configured = new JSONObject(new String(Files.readAllBytes(config.toPath()),
-                        StandardCharsets.UTF_8)).optString("backend_type", "cpu");
-                explicitHexagon = "hexagon".equals(configured);
-                requested = explicitHexagon || ("cpu".equals(configured)
-                        && ModelCatalog.findByPath(context, config.getParent()) != null);
-            } catch (Exception e) {
-                Log.w("LocalAiNotif", "Cannot read model backend", e);
-            }
-        }
-        boolean hexagon = requested && prepareHexagon(context);
         synchronized (LlmEngine.class) {
             if (!sNativesLoaded) {
                 System.loadLibrary("MNN");
@@ -57,30 +45,66 @@ public final class LlmEngine implements AutoCloseable {
                 sNativesLoaded = true;
             }
         }
-        byte[] path = utf8(configPath);
+        String configured = "";
         try {
-            if (hexagon) {
-                long ptr = nativeCreate(path, true, false);
-                if (ptr != 0) {
-                    Log.i("LocalAiNotif", "MNN backend=hexagon, v79 runtime ready");
-                    return new LlmEngine(ptr, path, true);
-                }
-                Log.w("LocalAiNotif", "Hexagon runtime or model load failed, using CPU");
-            }
-            long ptr = nativeCreate(path, false, explicitHexagon || hexagon);
-            return ptr != 0 ? new LlmEngine(ptr, path, false) : null;
-        } catch (Throwable t) {
-            android.util.Log.e("LocalAiNotif", "nativeCreate: " + t);
-            return null;
+            configured = new JSONObject(new String(Files.readAllBytes(config.toPath()),
+                    StandardCharsets.UTF_8)).optString("backend_type", "auto");
+        } catch (Exception e) {
+            Log.w("LocalAiNotif", "Cannot read model backend", e);
         }
+        boolean preset = context != null && ModelCatalog.findByPath(context, config.getParent()) != null;
+        boolean automatic = "auto".equals(configured) || (preset && "cpu".equals(configured));
+        String[] backends;
+        if (automatic || "hexagon".equals(configured)) {
+            backends = context != null && prepareHexagon(context)
+                    ? new String[]{"hexagon", "vulkan", "cpu"}
+                    : new String[]{"vulkan", "cpu"};
+        } else if ("vulkan".equals(configured) || "opencl".equals(configured)) {
+            backends = new String[]{"vulkan", "cpu"};
+        } else if ("cpu".equals(configured)) {
+            backends = new String[]{"cpu"};
+        } else {
+            backends = new String[]{"configured", "cpu"};
+        }
+        File cacheDir = context == null ? null : new File(context.getCacheDir(),
+                "mnn/" + Integer.toHexString(config.getAbsolutePath().hashCode()));
+        LlmEngine engine = new LlmEngine(utf8(configPath), backends, cacheDir);
+        return engine.loadNextBackend() ? engine : null;
     }
 
-    private static boolean prepareHexagon(Context context) {
-        if (!"SM8750".equalsIgnoreCase(Build.SOC_MODEL)) return false;
+    private boolean loadNextBackend() {
+        while (mNextBackend < mBackends.length) {
+            String backend = mBackends[mNextBackend++];
+            try {
+                JSONObject options = new JSONObject();
+                if (!"configured".equals(backend)) options.put("backend_type", backend);
+                if ("hexagon".equals(backend) || "vulkan".equals(backend)) {
+                    options.put("precision", "low").put("thread_num", 1);
+                    if (mCacheDir != null) {
+                        File dir = new File(mCacheDir, backend);
+                        if (dir.isDirectory() || dir.mkdirs()) options.put("tmp_path", dir.getAbsolutePath());
+                    }
+                }
+                mPtr = nativeCreate(mConfigPath, utf8(backend), utf8(options.toString()));
+                if (mPtr != 0) {
+                    Log.i("LocalAiNotif", "MNN backend=" + backend + ", model loaded");
+                    return true;
+                }
+                Log.w("LocalAiNotif", "Cannot load MNN backend=" + backend);
+            } catch (Exception | LinkageError | OutOfMemoryError e) {
+                Log.w("LocalAiNotif", "Cannot load MNN backend=" + backend, e);
+            }
+        }
+        return false;
+    }
+
+    private static synchronized boolean prepareHexagon(Context context) {
         File dir = new File(context.getApplicationInfo().nativeLibraryDir);
-        if (!new File(dir, "libMNN_htpops.so").isFile()
-                || !new File(dir, "libMNN_htpops_skelV79.so").isFile()) return false;
         try {
+            System.loadLibrary("MNN_htpops");
+            int arch = nativeHexagonArch();
+            String skel = String.format(Locale.ROOT, "libMNN_htpops_skelV%02X.so", arch);
+            if (arch == 0 || !new File(dir, skel).isFile()) return false;
             for (String variable : new String[]{"DSP_LIBRARY_PATH", "ADSP_LIBRARY_PATH"}) {
                 String previous = Os.getenv(variable);
                 String path = dir.getAbsolutePath();
@@ -90,8 +114,8 @@ public final class LlmEngine implements AutoCloseable {
                 if (!previous.startsWith(path + ";")) Os.setenv(variable, path + ";" + previous, true);
             }
             return true;
-        } catch (android.system.ErrnoException e) {
-            Log.w("LocalAiNotif", "Cannot configure Hexagon library path", e);
+        } catch (android.system.ErrnoException | UnsatisfiedLinkError e) {
+            Log.i("LocalAiNotif", "Hexagon unavailable: " + e.getMessage());
             return false;
         }
     }
@@ -103,22 +127,20 @@ public final class LlmEngine implements AutoCloseable {
     /** Blocking generation. Returns "" on any internal failure (caller decides fallback). */
     public synchronized String generate(String systemPrompt, String userPrompt, int maxNewTokens) {
         if (mPtr == 0) return "";
-        try {
-            byte[] system = utf8(systemPrompt);
-            byte[] user = utf8(userPrompt);
-            byte[] output = nativeGenerate(mPtr, system, user, maxNewTokens);
-            if (mHexagon && (output == null || output.length == 0)) {
-                Log.w("LocalAiNotif", "Hexagon generation failed, retrying on CPU");
-                close();
-                mHexagon = false;
-                mPtr = nativeCreate(mConfigPath, false, true);
-                if (mPtr != 0) output = nativeGenerate(mPtr, system, user, maxNewTokens);
+        byte[] system = utf8(systemPrompt);
+        byte[] user = utf8(userPrompt);
+        do {
+            try {
+                byte[] output = nativeGenerate(mPtr, system, user, maxNewTokens);
+                if (output != null && output.length > 0) return new String(output, StandardCharsets.UTF_8);
+            } catch (Exception | LinkageError | OutOfMemoryError e) {
+                Log.w("LocalAiNotif", "MNN generation failed", e);
             }
-            return output == null ? "" : new String(output, StandardCharsets.UTF_8);
-        } catch (Throwable t) {
-            android.util.Log.e("LocalAiNotif", "nativeGenerate: " + t);
-            return "";
-        }
+            if (mNextBackend == mBackends.length) break;
+            Log.w("LocalAiNotif", "Generation failed on " + mBackends[mNextBackend - 1] + ", retrying");
+            close();
+        } while (loadNextBackend());
+        return "";
     }
 
     @Override
@@ -144,7 +166,9 @@ public final class LlmEngine implements AutoCloseable {
         return text.substring(0, end);
     }
 
-    private static native long nativeCreate(byte[] configPath, boolean hexagon, boolean forceCpu);
+    private static native int nativeHexagonArch();
+
+    private static native long nativeCreate(byte[] configPath, byte[] backend, byte[] options);
 
     private static native byte[] nativeGenerate(long ptr, byte[] systemPrompt, byte[] userPrompt, int maxNewTokens);
 

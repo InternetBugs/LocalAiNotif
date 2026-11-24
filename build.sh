@@ -72,7 +72,7 @@ CXX="$NDK_DIR/toolchains/llvm/prebuilt/$HOST_TAG/bin/$CXX_BIN"
 MNN_NATIVE_BUILD="$PROJECT_DIR/build/mnn-hexagon"
 MNN_LIB="$(norm_path "${MNN_LIB:-$MNN_NATIVE_BUILD/libMNN.so}")"
 MNN_LIB_DIR="$(dirname "$MNN_LIB")"
-HEXAGON_OPS_DIR="$(norm_path "${HEXAGON_OPS_DIR:-$PROJECT_DIR/libs/hexagon-v79}")"
+HEXAGON_OPS_DIR="$(norm_path "${HEXAGON_OPS_DIR:-$PROJECT_DIR/libs/hexagon}")"
 JNI_OUT="$BUILD_DIR/jniLibs/arm64-v8a"
 
 rm -rf "$BUILD_DIR"
@@ -123,6 +123,7 @@ if [ "$MNN_LIB" = "$MNN_NATIVE_BUILD/libMNN.so" ]; then
         -DANDROID_ABI=arm64-v8a -DANDROID_NATIVE_API_LEVEL=android-24 -DANDROID_STL=c++_shared \
         -DCMAKE_BUILD_TYPE=Release "-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-z,max-page-size=16384" \
         -DMNN_HEXAGON=ON -DMNN_HEXAGON_APP_POWER_HOLD=ON -DMNN_USE_LOGCAT=ON \
+        -DMNN_OPENCL=OFF -DMNN_VULKAN=ON -DMNN_VULKAN_IMAGE=OFF -DMNN_USE_SYSTEM_LIB=OFF \
         -DMNN_SEP_BUILD=OFF -DMNN_BUILD_SHARED_LIBS=ON -DMNN_BUILD_FOR_ANDROID_COMMAND=ON \
         -DMNN_BUILD_LLM=ON -DMNN_SUPPORT_TRANSFORMER_FUSE=ON -DMNN_ARM82=ON -DMNN_LOW_MEMORY=ON \
         -DMNN_OPENMP=OFF -DMNN_KLEIDIAI=OFF -DMNN_BUILD_DEMO=OFF -DMNN_LLM_BUILD_DEMO=OFF
@@ -134,10 +135,11 @@ import pathlib, sys
 binary = pathlib.Path(sys.argv[1]).read_bytes()
 if any(marker not in binary for marker in (
         b'LocalAiNotif: Hexagon projection backend active',
-        b'LocalAiNotif: Hexagon GatedRMSNorm backend active')):
-    sys.exit('libMNN.so lacks the LocalAiNotif Hexagon backend. Build with jni/MnnHexagon.cmake.')
+        b'LocalAiNotif: Hexagon GatedRMSNorm backend active', b'vkCreateInstance')) or b'libOpenCL.so' in binary:
+    sys.exit('libMNN.so must match the Hexagon and Vulkan build configuration.')
 EOF
-cp "$HEXAGON_OPS_DIR/libMNN_htpops.so" "$HEXAGON_OPS_DIR/libMNN_htpops_skelV79.so" "$JNI_OUT/"
+cp "$HEXAGON_OPS_DIR/libMNN_htpops.so" "$HEXAGON_OPS_DIR"/libMNN_htpops_skelV[0-9][0-9].so "$JNI_OUT/"
+"$PY" "$PROJECT_DIR/tools/hexagon/verify.py" "$JNI_OUT"
 "$CXX" --target=aarch64-linux-android24 -std=c++17 -O2 -fPIC -shared \
     -I "$MNN_DIR/include" -I "$MNN_DIR/source" -I "$MNN_DIR/express" \
     -I "$MNN_DIR/schema/current" -I "$MNN_DIR/3rd_party/flatbuffers/include" \

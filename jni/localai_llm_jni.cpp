@@ -24,28 +24,34 @@ std::string readBytes(JNIEnv* env, jbyteArray bytes) {
 
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_localai_notif_LlmEngine_nativeCreate(JNIEnv* env, jclass, jbyteArray configPath,
-                                              jboolean hexagon, jboolean forceCpu) {
+                                              jbyteArray backend, jbyteArray optionsJson) {
     try {
         std::string path = readBytes(env, configPath);
         if (env->ExceptionCheck() || path.empty()) return 0;
         std::unique_ptr<Llm> llm(Llm::createLLM(path));
         if (!llm) return 0;
-        if (hexagon) {
+        std::string name = readBytes(env, backend);
+        std::string settings = readBytes(env, optionsJson);
+        if (env->ExceptionCheck()) return 0;
+        MNNForwardType type = MNN_FORWARD_CPU;
+        if (name == "hexagon") type = MNN_FORWARD_HEXAGON;
+        if (name == "vulkan") type = MNN_FORWARD_VULKAN;
+        if (type != MNN_FORWARD_CPU) {
             MNN::Express::ExecutorScope scope(llm->getExecutor());
             MNN::ScheduleConfig schedule;
             MNN::BackendConfig options;
             options.precision = MNN::BackendConfig::Precision_Low;
-            schedule.type = MNN_FORWARD_HEXAGON;
+            schedule.type = type;
             schedule.numThread = 1;
             schedule.backendConfig = &options;
             using RuntimeManager = MNN::Express::Executor::RuntimeManager;
             std::unique_ptr<RuntimeManager> probe(RuntimeManager::createRuntimeManager(schedule));
             auto runtimes = MNN::Express::Executor::getRuntime();
-            if (!probe || !runtimes.first.count(MNN_FORWARD_HEXAGON)) return 0;
-            llm->set_config(R"({"backend_type":"hexagon","precision":"low","thread_num":1})");
-        } else if (forceCpu) {
-            llm->set_config(R"({"backend_type":"cpu"})");
+            int selected = -1;
+            if (!probe || !probe->getInfo(MNN::Interpreter::BACKENDS, &selected) ||
+                selected != type || !runtimes.first.count(type)) return 0;
         }
+        llm->set_config(settings);
         // Greedy decoding: MNN defaults to mixed sampling at temperature 1.0, which makes
         // summaries drift from the source text and classification JSON unstable.
         // Must be set before load(), where the sampler is created.
@@ -75,7 +81,9 @@ Java_com_localai_notif_LlmEngine_nativeGenerate(JNIEnv* env, jclass, jlong ptr,
         // previous (possibly interrupted) call so notifications never leak into each other.
         llm->reset();
         llm->response(msgs, &oss, nullptr, maxNewTokens > 0 ? maxNewTokens : -1);
-        if (llm->getContext()->status == MNN::Transformer::LlmStatus::INTERNAL_ERROR) return nullptr;
+        auto status = llm->getContext()->status;
+        if (status == MNN::Transformer::LlmStatus::INTERNAL_ERROR ||
+            status == MNN::Transformer::LlmStatus::TIMEOUT) return nullptr;
         std::string output = oss.str();
         if (output.size() > std::numeric_limits<jsize>::max()) return nullptr;
         jsize length = static_cast<jsize>(output.size());

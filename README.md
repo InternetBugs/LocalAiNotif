@@ -6,7 +6,7 @@
 
 > 本地端大模型驱动的 HyperOS 智能通知模块（LSPosed · 100% 离线端侧推理）
 
-**LocalAiNotif** 是一款面向小米澎湃 OS（HyperOS）的开源 LSPosed 模块。模块内置 [MNN-LLM](https://github.com/alibaba/MNN) 端侧推理引擎，在设备本地运行 **Qwen3.5** 量化模型，并支持高通骁龙 Hexagon NPU 与 CPU 混合推理。模块为系统通知中心、锁屏、状态栏、音量面板与小米超级岛带来 **AI 通知摘要**、**单条长通知 AI 概括**、**重要通知专区**、**噪音过滤** 与 **减少干扰模式**。所有通知文本均在手机本地完成处理，**无需云端 API、不上传任何隐私数据、不依赖小米云控或小米账号**。
+**LocalAiNotif** 是一款面向小米澎湃 OS（HyperOS）的开源 LSPosed 模块。模块内置 [MNN-LLM](https://github.com/alibaba/MNN) 端侧推理引擎，在设备本地运行 **Qwen3.5** 量化模型，按 **Hexagon NPU → Vulkan GPU → CPU** 自动选择并回退推理后端。模块为系统通知中心、锁屏、状态栏、音量面板与小米超级岛带来 **AI 通知摘要**、**单条长通知 AI 概括**、**重要通知专区**、**噪音过滤** 与 **减少干扰模式**。所有通知文本均在手机本地完成处理，**无需云端 API、不上传任何隐私数据、不依赖小米云控或小米账号**。
 
 ---
 
@@ -20,7 +20,7 @@
 | 测试环境 | **HyperOS 4 / Android 17**（小米 15），`minSdkVersion = 34` / `targetSdkVersion = 36` |
 | 权限框架 | Root + **LSPosed**（`libxposed` API 102，静态作用域） |
 | 芯片架构 | ARM64 (`arm64-v8a`)，原生支持 Android 15+ 16KB 页对齐 |
-| 推理后端 | CPU，以及高通骁龙 Hexagon NPU（当前适配骁龙 8 至尊版 `SM8750` / Hexagon v79，不可用时自动回退 CPU） |
+| 推理后端 | 自动按 **高通 Hexagon NPU**（内置 `v73 / v75 / v79 / v81 / v83 / v85` DSP 算子库）→ **Vulkan GPU** → **CPU** 依次选择与回退。Vulkan GPU 加速取决于设备驱动，可用于骁龙、天玑、玄戒等平台。 |
 
 > 模块深度对接 HyperOS 4 原生通知框架（`HyperNotificationManagerService`、`MiuiSystemUI`、音量面板插件、小米超级岛、`MIUINotificationCenter` 与系统设置）。若在未测试系统版本中遇到不匹配的 Hook 符号，对应特性会自动安全降级，不会导致系统崩溃，但部分视觉或交互能力可能不可用。
 
@@ -35,7 +35,7 @@
 ## 核心功能
 
 > [!NOTE]
-> 以下配图基于 `v2.0.0` 默认**「超级小爱流光」**主题绘制，实际渲染效果随所选光效风格（支持热切「星云极光」）、系统深浅色与壁纸材质实时自适应。
+> 以下配图基于默认**「超级小爱流光」**主题绘制，实际渲染效果随所选光效风格（支持热切「星云极光」）、系统深浅色与壁纸材质实时自适应。
 
 ### 1. AI 摘要（折叠组多条汇总）
 - **自然连贯第三人称摘要**：所有通知先按系统流程即时投递原文；同一应用的多条通知折叠成组后，由端侧模型在后台生成 Apple Intelligence 式 **1–2 句自然连贯的第三人称汇总**（保留发件人、关键动作及取件码/验证码/时间/金额/地点，保持原文语言）。
@@ -93,6 +93,7 @@
 
 ### 6. 双光效风格、本地模型与 HyperOS 原生设置
 - **双「光效风格」无重启热切换**：在首页「其他 › 光效风格」可在 **超级小爱流光（默认，暖橙/玫粉/薰衣草紫/电光蓝）** 与 **星云极光（天青/晴空蓝/冰紫）** 间一键切换，实时广播同步至通知栏全部 AI 视觉（AI 摘要、AI 概括、重要通知合卡、减少干扰超级岛）及设置页全部 **5 组动态示意图**。
+- **三层异构推理与自动回退**：内置高通 Hexagon 六代 DSP 算子库（`v73 / v75 / v79 / v81 / v83 / v85`）与 Vulkan GPU 支持，运行时通过 FastRPC 自动探测 DSP 架构并按 **Hexagon NPU → Vulkan GPU → CPU** 依次探测与推理；初始化失败、生成报错、超时或返回空结果时自动释放并切换至下一后端重试当前请求，所有后端共用同一份 MNN INT4 权重。
 - **多镜像源一键下载与本地导入**：内置 **魔搭社区 ModelScope（默认推荐）**、**HF-Mirror** 与 **Hugging Face** 三下载源，支持断点续传、仅 Wi-Fi 下载保护（默认开启）与前台服务进度通知；同时支持通过系统目录选择器导入手机上已有的 MNN-LLM 模型目录，查看详情与原目录位置，删除导入模型时仅移除模块内部副本，不动原文件夹。
 - **独立隔离进程与内存策略**：推理引擎运行在独立 `:inference` 进程，不占用 `system_server` 内存，内置 MIUI 墓碑冻结（`GreezeManager`）重试保护；默认按需懒加载并在空闲 **3 分钟** 无推理后自动卸载释放内存，同时提供**始终加载 AI 模型**开关（由 `system_server` 静默绑定 `ModelKeepAliveService`，通知到达免冷启动）。
 - **HyperOS 原生设置与「关于」页**：全页采用纯原生 Java View 实现 HyperOS 4 视觉规范（`18dp` 连续曲率超椭圆卡片、`28dp` 左对齐基准线、MiSans 可变字重、自绘阻尼胶囊开关、**5 组实时联动功能示意图**，自适应浅色与 OLED 纯黑深色模式）。「关于」页支持：
@@ -132,15 +133,19 @@
 | 模型（MNN INT4） | 下载大小 | 推理后端 | 推理进程峰值内存 | 短通知摘要耗时 |
 |---|---:|---|---:|---:|
 | **Qwen3.5-0.8B（推荐）** | 约 550 MB | CPU | 924 MiB | 0.36 秒 |
+| **Qwen3.5-0.8B（推荐）** | 同一份模型 | Vulkan GPU | 1,020 MiB | 0.68 秒 |
 | **Qwen3.5-0.8B（推荐）** | 同一份模型 | Hexagon NPU + CPU | 299 MiB | 0.99 秒 |
 | **Qwen3.5-2B** | 约 1.27 GB | CPU | 1,725 MiB | 0.73 秒 |
+| **Qwen3.5-2B** | 同一份模型 | Vulkan GPU | 2,208 MiB | 2.72 秒 |
 | **Qwen3.5-2B** | 同一份模型 | Hexagon NPU + CPU | 1,343 MiB | 4.99 秒 |
 
-> 数据来自小米 15（骁龙 8 至尊版 `SM8750`）实测，每种后端独立运行三次取中位数。内存为完成短通知摘要与分类期间 `:inference` 进程峰值 RSS（NPU 专用内存未单独计量）；耗时为同一条会议通知生成一句摘要的输入处理与生成耗时，不含模型加载、回退重试或排队耗时。
+> 数据来自小米 15（骁龙 8 至尊版 `SM8750`）实测，每种后端独立运行三次取中位数。内存为完成短通知摘要与分类期间的进程峰值 RSS。CPU 和 NPU 数据来自 `:inference` 进程，Vulkan 数据来自加载同一应用推理引擎的独立测试进程。GPU 和 NPU 专用内存未单独计量。耗时为同一条会议通知生成一句摘要的时间，不含模型加载、回退重试或排队耗时。
 
-两款预设模型均支持在高通骁龙 8 至尊版（`SM8750`，Hexagon v79）上自动启用 Hexagon NPU 混合推理：NPU 承担投影运算（2B 模型额外承接 `GatedRMSNorm`），注意力等其余算子由 CPU 完成；若设备不支持或初始化/生成失败，引擎会自动静默回退至 CPU 后端。手动导入的本地模型可在其 `config.json` 中指定 `"backend_type": "hexagon"` 启用混合推理。
+两款预设模型的权重在所有后端间共用。引擎通过 FastRPC 查询高通 DSP 的实际架构，加载匹配的 v73、v75、v79、v81、v83 或 v85 算子库。Hexagon 路径要求设备具备 FP16 HMX 且应用可访问 CDSP。在小米 15 的既有实测中，NPU 承担投影运算，2B 模型还使用 NPU 做门控归一化，其余算子由 CPU 协作。其他架构的算子库已经编译并核对 ELF 架构，实际覆盖取决于芯片和 ROM。
 
-APK 已内置 `libs/hexagon-v79/` 中的 Android FastRPC 接口库与 DSP 算子库（`libMNN_htpops.so`、`libMNN_htpops_skelV79.so`）。如需自行重编，可在 Linux 上设置 `MNN_DIR`（与发版流程相同的 MNN 提交）、`HEXAGON_SDK_ROOT`（`6.4.0.2`）和 `ANDROID_NDK_HOME`（`r28c`），执行 `bash tools/hexagon/build-v79.sh`。
+NPU 不可用时，引擎尝试 Vulkan，最后回退到 CPU。初始化失败、生成报错、超时或返回空结果时会释放当前引擎，在下一个可用后端重试同一条请求。后续请求沿用成功的后端，直至模型卸载。手动导入模型可在 `config.json` 中省略 `backend_type` 或设置为 `"auto"`（及 `"hexagon"`）以使用完整顺序，也可指定 `"vulkan"`（失败后回退 CPU）或 `"cpu"`。GPU 路径的耗时、功耗和内存需按设备实测。
+
+APK 已内置 `libs/hexagon/` 中的一份 Android FastRPC 接口库与各架构的 DSP 算子库。Linux 重编时，设置 `MNN_DIR` 为发版流程锁定的 MNN 源码、`HEXAGON_SDK_ROOT` 为 SDK 根目录。SDK 6.4.0.2 可执行 `bash tools/hexagon/build-ops.sh v73 v75 v79 v81`；v83 和 v85 使用 SDK 6.7.0.0 及其 `HEXAGON_TOOLS_ROOT=…/tools/HEXAGON_Tools/21.0.04`，执行 `bash tools/hexagon/build-ops.sh v83 v85`。设置 `ANDROID_NDK_HOME`（r28c）可同时重编 Android 接口库。`python3 tools/hexagon/verify.py <APK>` 可验证包内全部 DSP 架构。
 
 ### 第三步：按需调整功能与入口
 - **AI 摘要 / 重要通知**：默认开启并对全部应用生效，可在首页一键开关或进入「摘要触发设置」调整触发参数。
@@ -163,6 +168,9 @@ APK 已内置 `libs/hexagon-v79/` 中的 Android FastRPC 接口库与 DSP 算子
 
 **Q：支持 HyperOS 2 / HyperOS 3 或 Android 15 / 16 吗？**  
 A：当前仅在 **HyperOS 4 / Android 17（小米 15）** 完成端到端实测，**不保证更低版本系统或非 HyperOS 4 设备的兼容性**。部分深度 Hook（如音量面板第三行、超级岛流光、状态栏图标过滤、推广通知折叠页与重要通知合卡）强依赖 HyperOS 4 对应组件签名；不匹配项会自动降级，但无法保证全部特性可用。
+
+**Q：支持哪些处理器的 NPU 或 GPU 加速？可以强制只用 CPU 吗？**  
+A：预设模型自动按 **Hexagon NPU → Vulkan GPU → CPU** 顺序尝试。高通骁龙平台在运行时通过 FastRPC 查询 DSP 架构，自动匹配内置的 `v73 / v75 / v79 / v81 / v83 / v85` 算子库（需设备具备 FP16 HMX 且应用可访问 CDSP）；不满足 Hexagon 条件时自动尝试 Vulkan GPU（适用于具备兼容 Vulkan 驱动的骁龙、天玑、玄戒等平台），初始化失败、超时或生成出错时自动回退至 CPU。如需手动指定起点或强制使用 CPU，可通过「导入本地模型」并在模型目录的 `config.json` 中将 `"backend_type"` 设为 `"auto"`、`"vulkan"` 或 `"cpu"`。
 
 **Q：刚重启或首次收到通知时，为什么摘要、概括或重要通知识别需要等待一会儿？**  
 A：默认按需加载模型，并在空闲 **3 分钟** 无推理后自动卸载释放内存，下一次推理前会先等待模型冷加载。如果希望通知到达零等待，可在首页「本地模型」中开启**始终加载 AI 模型**。Hexagon 后端在算子空闲约 100 毫秒后会自动撤销高性能投票。
@@ -230,9 +238,10 @@ BUILD_TYPE=release SIGNING_CONFIG=/path/to/signing-backup.json bash build.sh
 |---|---|
 | `src/com/localai/notif/` | 纯 Java 17 模块源码（`ModuleMain`、`NotificationSummaries`、`InferenceProvider`、`LlmEngine`、`Classifier`、`SystemUi*`、`PrioritySectionFrame`、`PriorityShadeRevealAnimator`、`GlowStyle`、`NebulaSummaryVisuals`、`MainActivity`、`HyperSettingsUi`、`AboutActivity` 等） |
 | `jni/` | MNN-LLM JNI 封装（`localai_llm_jni.cpp`）与 Hexagon 投影/归一化桥接（`MnnHexagon.cmake`、`HexagonProjectionFactory.cpp`） |
-| `libs/hexagon-v79/` | 随 APK 打包的 Hexagon v79 FastRPC 接口库与 DSP 算子库 |
+| `libs/hexagon/` | 随 APK 打包的 Android FastRPC 接口库（`libMNN_htpops.so`）与 `v73 / v75 / v79 / v81 / v83 / v85` 六代 Hexagon DSP 算子库 |
+| `tools/hexagon/` | 多代 Hexagon DSP 算子库构建脚本（`build-ops.sh`）、FastRPC 架构探测（`device.c`）与包体校验工具（`verify.py`） |
 | `META-INF/xposed/` | `libxposed` API 102 模块元信息、入口类列表与 5 项静态作用域 |
-| `.github/workflows/release.yml` | 仅手动触发（`workflow_dispatch`）的云端正式发版流水线，自动构建并校验 Release + Debug 双签 APK 与 `SHA256SUMS.txt` |
+| `.github/workflows/release.yml` | 仅手动触发（`workflow_dispatch`）的云端正式发版流水线，自动构建并校验 Hexagon + Vulkan 原生库、16KB 页对齐、双签 APK 与 `SHA256SUMS.txt` |
 | `docs/设计.md` · `docs/交接.md` · `AGENTS.md` | 架构设计、Hook 符号记录、实机验证交接与 HyperOS UI 开发规范 |
 
 ---

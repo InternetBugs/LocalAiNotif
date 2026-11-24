@@ -664,8 +664,8 @@ public final class ModelDownloadActivity extends Activity implements ModelDownlo
         sheet.addView(specBox, specBoxLp);
         if (spec != null) {
             TextView note = HyperSettingsUi.createFooter(this, mPalette,
-                    "骁龙 8 至尊版实测。内存为推理进程峰值，NPU 专用内存未单独计量。"
-                            + "响应用时取同一条短通知摘要的三次中位数，不含模型加载。");
+                    "骁龙 8 至尊版实测，取三次中位数。内存为进程峰值 RSS，GPU 和 NPU 专用内存未单独计量。"
+                            + "响应用时为生成同一条短通知摘要的耗时，不含模型加载。");
             LinearLayout.LayoutParams noteLp = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
             noteLp.topMargin = dp(8);
