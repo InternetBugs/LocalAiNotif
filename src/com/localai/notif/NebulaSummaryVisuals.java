@@ -21,6 +21,7 @@ import android.graphics.Shader;
  */
 final class NebulaSummaryVisuals {
     static final String LABEL = "AI 摘要";
+    static final String RECAP_LABEL = NotificationRecap.LABEL;
 
     // --- Nebula Aurora (cool) stops ---
     static final int DARK_CYAN = 0xFF7CEBFF;
@@ -338,6 +339,67 @@ final class NebulaSummaryVisuals {
     }
 
     /**
+     * Draws a single centered 4-point AI sparkle for "AI 概括" (visually distinct from the dual
+     * sparkles used by multi-notification "AI 摘要", while sharing identical glow optics).
+     */
+    static float drawSingleSparkle(
+            Canvas canvas,
+            float left,
+            float centerY,
+            float radius,
+            boolean darkSurface,
+            boolean xiaoAi,
+            float alphaScale,
+            float bloom,
+            Shader shader,
+            Paint fillPaint,
+            Path path) {
+        float totalW = singleSparkleWidth(radius);
+        if (alphaScale <= 0.01f || radius <= 0.5f) return totalW;
+
+        float scale = 1f + 0.16f * bloom;
+        float cx = left + totalW * 0.5f;
+        float cy = centerY;
+        float r = radius * scale;
+
+        if (bloom > 0.02f) {
+            fillPaint.setShader(null);
+            int haloColor = xiaoAi
+                    ? (darkSurface ? 0xFFFF865C : 0xFFD93B88)
+                    : (darkSurface ? DARK_CYAN : LIGHT_AZURE);
+            int haloAlpha = clamp255(Math.round((darkSurface ? 92f : 64f) * bloom * alphaScale));
+            if (haloAlpha > 0) {
+                fillPaint.setColor(withAlpha(haloColor, haloAlpha));
+                canvas.drawCircle(cx, cy, r * 1.22f, fillPaint);
+            }
+        }
+
+        Shader useShader = shader != null
+                ? shader
+                : createDiagonalSparkleGradient(
+                        left, centerY - radius,
+                        left + totalW, centerY + radius,
+                        darkSurface, xiaoAi);
+        fillPaint.setShader(useShader);
+        fillPaint.setAlpha(clamp255(Math.round(255f * alphaScale)));
+
+        buildSparklePath(cx, cy, r, path);
+        canvas.drawPath(path, fillPaint);
+
+        fillPaint.setShader(null);
+        float coreAlpha = ((darkSurface ? 0.58f : 0.44f) + 0.38f * bloom) * alphaScale;
+        int coreOp = clamp255(Math.round(255f * coreAlpha));
+        if (coreOp > 0) {
+            fillPaint.setColor(xiaoAi
+                    ? Color.argb(coreOp, 255, 248, 244)
+                    : Color.argb(coreOp, 245, 252, 255));
+            buildSparklePath(cx, cy, r * 0.46f, path);
+            canvas.drawPath(path, fillPaint);
+        }
+        return totalW;
+    }
+
+    /**
      * Draws a softly feathered 14-degree tilted optical light wave across the given bounds.
      * Used for both the subtle thinking scanlight and the hero Wave Wash reveal wavefront.
      */
@@ -377,6 +439,10 @@ final class NebulaSummaryVisuals {
 
     static float dualSparkleWidth(float primaryR) {
         return primaryR * 2.52f;
+    }
+
+    static float singleSparkleWidth(float radius) {
+        return radius * 2.16f;
     }
 
     static float smoothEnvelope(float t, float attack) {

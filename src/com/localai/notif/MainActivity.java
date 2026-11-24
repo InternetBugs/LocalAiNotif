@@ -29,6 +29,8 @@ public final class MainActivity extends Activity implements ModelDownloadManager
     private static final Executor OPTION_IO = Executors.newSingleThreadExecutor();
     private static final String STATE_PRIORITY_ENABLED = "state_priority_enabled";
     private static final String STATE_GROUP_SUMMARY = "state_group_summary";
+    private static final String STATE_RECAP_SCREEN_ON = "state_recap_screen_on";
+    private static final String STATE_RECAP_MIN_LENGTH = "state_recap_min_length";
     private static final String STATE_REDUCE_ENABLED = "state_reduce_enabled";
     private static final String STATE_REDUCE_LOCK_ONLY = "state_reduce_lock_only";
     private static final String STATE_ALWAYS_LOAD_MODEL = "state_always_load_model";
@@ -36,11 +38,14 @@ public final class MainActivity extends Activity implements ModelDownloadManager
 
     private HyperSettingsUi.Palette mPalette;
     private HyperSettingsUi.SummaryPreviewView mSummaryPreview;
+    private HyperSettingsUi.RecapPreviewView mRecapPreview;
     private HyperSettingsUi.PriorityPreviewView mPriorityPreview;
     private HyperSettingsUi.ReducePreviewView mReducePreview;
     private HyperSettingsUi.SwitchRowParts mSummaryRow;
-    private HyperSettingsUi.SwitchRowParts mRecapRow;
     private HyperSettingsUi.NavRowParts mSummaryAdvancedRow;
+    private HyperSettingsUi.SwitchRowParts mRecapRow;
+    private HyperSettingsUi.SwitchRowParts mRecapScreenOnRow;
+    private HyperSettingsUi.NavRowParts mRecapMinLengthRow;
     private HyperSettingsUi.SwitchRowParts mPriorityRow;
     private HyperSettingsUi.SwitchRowParts mPromotionRow;
     private HyperSettingsUi.PromotionPreviewView mPromotionPreview;
@@ -57,10 +62,13 @@ public final class MainActivity extends Activity implements ModelDownloadManager
     private ModelDownloadManager mDownloadManager;
 
     private boolean mSummaryBusy;
+    private boolean mRecapBusy;
+    private boolean mRecapMinLengthBusy;
     private boolean mPriorityBusy;
     private boolean mReduceBusy;
     private boolean mAlwaysLoadBusy;
     private boolean mGlowStyleBusy;
+    private int mRecapMinLength = Config.DEFAULT_RECAP_MIN_LENGTH;
     private String mGlowStyle = Config.DEFAULT_GLOW_STYLE;
     private boolean mEngineReceiverRegistered;
     private boolean mReduceReceiverRegistered;
@@ -119,6 +127,16 @@ public final class MainActivity extends Activity implements ModelDownloadManager
         boolean initialAlwaysLoad = savedInstanceState != null
                 ? savedInstanceState.getBoolean(STATE_ALWAYS_LOAD_MODEL, Config.DEFAULT_ALWAYS_LOAD_MODEL)
                 : Config.DEFAULT_ALWAYS_LOAD_MODEL;
+        boolean initialRecap = savedInstanceState != null
+                ? savedInstanceState.getBoolean(Config.KEY_NOTIFICATION_RECAP, Config.DEFAULT_NOTIFICATION_RECAP)
+                : Config.DEFAULT_NOTIFICATION_RECAP;
+        boolean initialRecapScreenOn = savedInstanceState != null
+                ? savedInstanceState.getBoolean(STATE_RECAP_SCREEN_ON, Config.DEFAULT_RECAP_SCREEN_ON)
+                : Config.DEFAULT_RECAP_SCREEN_ON;
+        mRecapMinLength = savedInstanceState != null
+                ? Config.sanitizeRecapMinLength(
+                        savedInstanceState.getInt(STATE_RECAP_MIN_LENGTH, Config.DEFAULT_RECAP_MIN_LENGTH))
+                : Config.DEFAULT_RECAP_MIN_LENGTH;
         mGlowStyle = savedInstanceState != null
                 ? Config.sanitizeGlowStyle(savedInstanceState.getString(STATE_GLOW_STYLE, Config.DEFAULT_GLOW_STYLE))
                 : Config.DEFAULT_GLOW_STYLE;
@@ -126,7 +144,7 @@ public final class MainActivity extends Activity implements ModelDownloadManager
 
         setContentView(buildContentView(
                 initialPriority, initialSummary,
-                savedInstanceState != null && savedInstanceState.getBoolean(Config.KEY_NOTIFICATION_RECAP),
+                initialRecap, initialRecapScreenOn,
                 initialReduce, initialReduceLockOnly,
                 savedInstanceState != null && savedInstanceState.getBoolean(Config.KEY_REDUCE_FILTER_ICONS),
                 savedInstanceState != null && savedInstanceState.getBoolean(Config.KEY_REDUCE_NORMAL_SOUNDS),
@@ -215,7 +233,13 @@ public final class MainActivity extends Activity implements ModelDownloadManager
         if (mSummaryRow != null) {
             outState.putBoolean(STATE_GROUP_SUMMARY, mSummaryRow.toggle.isChecked());
         }
-        outState.putBoolean(Config.KEY_NOTIFICATION_RECAP, mRecapRow.toggle.isChecked());
+        if (mRecapRow != null) {
+            outState.putBoolean(Config.KEY_NOTIFICATION_RECAP, mRecapRow.toggle.isChecked());
+        }
+        if (mRecapScreenOnRow != null) {
+            outState.putBoolean(STATE_RECAP_SCREEN_ON, mRecapScreenOnRow.toggle.isChecked());
+        }
+        outState.putInt(STATE_RECAP_MIN_LENGTH, mRecapMinLength);
         if (mReduceRow != null) {
             outState.putBoolean(STATE_REDUCE_ENABLED, mReduceRow.toggle.isChecked());
         }
@@ -243,6 +267,7 @@ public final class MainActivity extends Activity implements ModelDownloadManager
             boolean initialPriority,
             boolean initialSummary,
             boolean initialRecap,
+            boolean initialRecapScreenOn,
             boolean initialReduce,
             boolean initialReduceLockOnly,
             boolean initialReduceFilterIcons,
@@ -273,7 +298,7 @@ public final class MainActivity extends Activity implements ModelDownloadManager
                 this,
                 mPalette,
                 "AI 摘要",
-                "自动概括多条折叠通知的要点。",
+                "将同一应用的多条折叠通知汇总为简明摘要。",
                 initialSummary,
                 false,
                 false);
@@ -295,22 +320,15 @@ public final class MainActivity extends Activity implements ModelDownloadManager
                 null,
                 false,
                 false,
-                false);
+                true);
         mSummaryAdvancedRow.row.setOnClickListener(v ->
                 startActivity(new Intent(this, SummarySettingsActivity.class)));
         summaryCard.addView(mSummaryAdvancedRow.row);
-        summaryCard.addView(HyperSettingsUi.createInsetDivider(this, mPalette));
-        mRecapRow = HyperSettingsUi.createSwitchRow(this, mPalette, NotificationRecap.LABEL,
-                "自动概括单条较长的通知，展开该条通知可读原文。",
-                initialRecap, false, true);
-        mRecapRow.row.setOnClickListener(view -> {
-            boolean target = !mRecapRow.toggle.isChecked();
-            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
-            mRecapRow.toggle.setChecked(target, true);
-            saveSwitchOption(Config.KEY_NOTIFICATION_RECAP, target, mRecapRow);
-        });
-        summaryCard.addView(mRecapRow.row);
         content.addView(summaryCard);
+
+        // 2. Section: AI 概括 (dedicated preview + toggle + screen-on + min-length threshold)
+        content.addView(HyperSettingsUi.createSmallTitle(this, mPalette, NotificationRecap.LABEL, 20));
+        content.addView(buildRecapCard(initialRecap, initialRecapScreenOn));
 
         // 2. Section: 重要通知 (preview + toggle unified inside one 18dp squircle card)
         content.addView(HyperSettingsUi.createSmallTitle(this, mPalette, "重要通知", 20));
@@ -510,6 +528,68 @@ public final class MainActivity extends Activity implements ModelDownloadManager
         return shell.root;
     }
 
+    private LinearLayout buildRecapCard(boolean enabled, boolean screenOn) {
+        LinearLayout card = HyperSettingsUi.createGroupCard(this, mPalette, 0);
+
+        FrameLayout recapPreviewWrap = new FrameLayout(this);
+        recapPreviewWrap.setPadding(dp(16), dp(16), dp(16), dp(4));
+        mRecapPreview = new HyperSettingsUi.RecapPreviewView(this, mPalette);
+        mRecapPreview.setRecapEnabled(enabled, false);
+        recapPreviewWrap.addView(mRecapPreview, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        card.addView(recapPreviewWrap, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        mRecapRow = HyperSettingsUi.createSwitchRow(
+                this,
+                mPalette,
+                NotificationRecap.LABEL,
+                "自动提炼单条长通知要点，展开后可查看完整原文。",
+                enabled,
+                false,
+                false);
+        mRecapRow.row.setOnClickListener(view -> {
+            if (mRecapBusy) return;
+            boolean target = !mRecapRow.toggle.isChecked();
+            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+            setRecapVisual(target, true);
+            saveRecapEnabled(target);
+        });
+        card.addView(mRecapRow.row);
+        card.addView(HyperSettingsUi.createInsetDivider(this, mPalette));
+
+        mRecapScreenOnRow = HyperSettingsUi.createSwitchRow(
+                this,
+                mPalette,
+                "亮屏时概括",
+                "关闭后仅在息屏时生成新概括，亮屏期间保持原文。",
+                screenOn,
+                false,
+                false);
+        mRecapScreenOnRow.row.setOnClickListener(view -> {
+            if (!mRecapScreenOnRow.row.isClickable()) return;
+            boolean target = !mRecapScreenOnRow.toggle.isChecked();
+            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+            mRecapScreenOnRow.toggle.setChecked(target, true);
+            saveSwitchOption(Config.KEY_RECAP_SCREEN_ON, target, mRecapScreenOnRow);
+        });
+        card.addView(mRecapScreenOnRow.row);
+        card.addView(HyperSettingsUi.createInsetDivider(this, mPalette));
+
+        mRecapMinLengthRow = HyperSettingsUi.createNavRow(
+                this,
+                mPalette,
+                "触发字数门槛",
+                "正文超过此字数时自动概括，英文按约 2 字母折 1 字。",
+                formatRecapMinLength(mRecapMinLength),
+                false,
+                false,
+                true);
+        mRecapMinLengthRow.row.setOnClickListener(v -> showRecapMinLengthDialog());
+        card.addView(mRecapMinLengthRow.row);
+        return card;
+    }
+
     private LinearLayout buildPromotionCard(boolean enabled) {
         LinearLayout card = HyperSettingsUi.createGroupCard(this, mPalette, 0);
 
@@ -558,6 +638,52 @@ public final class MainActivity extends Activity implements ModelDownloadManager
             mSummaryPreview.setSummaryEnabled(enabled, animate);
         }
         applySummaryDependentAlpha(enabled);
+    }
+
+    private void setRecapVisual(boolean enabled, boolean animate) {
+        if (mRecapRow != null) {
+            mRecapRow.toggle.setChecked(enabled, animate);
+        }
+        if (mRecapPreview != null) {
+            mRecapPreview.setRecapEnabled(enabled, animate);
+        }
+    }
+
+    private void showRecapMinLengthDialog() {
+        if (mRecapMinLengthBusy) return;
+        int selected = 1;
+        for (int i = 0; i < Config.RECAP_MIN_LENGTH_OPTIONS.length; i++) {
+            if (Config.RECAP_MIN_LENGTH_OPTIONS[i] == mRecapMinLength) {
+                selected = i;
+                break;
+            }
+        }
+        List<HyperSettingsUi.ChoiceItem> items = Arrays.asList(
+                new HyperSettingsUi.ChoiceItem("50 字", "约 50 个汉字或 100 个英文字母，覆盖较短段落"),
+                new HyperSettingsUi.ChoiceItem("80 字（默认）", "约 80 个汉字或 160 个英文字母，兼顾阅读与精简"),
+                new HyperSettingsUi.ChoiceItem("120 字", "约 120 个汉字或 240 个英文字母，仅概括明显长消息"),
+                new HyperSettingsUi.ChoiceItem("200 字", "约 200 个汉字或 400 个英文字母，仅概括超长通知")
+        );
+        HyperSettingsUi.showChoiceDialog(this, mPalette, "触发字数门槛", items, selected, idx -> {
+            if (idx < 0 || idx >= Config.RECAP_MIN_LENGTH_OPTIONS.length) return;
+            int target = Config.RECAP_MIN_LENGTH_OPTIONS[idx];
+            if (target == mRecapMinLength) return;
+            int previous = mRecapMinLength;
+            setRecapMinLengthVisual(target);
+            saveRecapMinLength(target, previous);
+        });
+    }
+
+    private void setRecapMinLengthVisual(int minLength) {
+        mRecapMinLength = Config.sanitizeRecapMinLength(minLength);
+        if (mRecapMinLengthRow != null) {
+            mRecapMinLengthRow.value.setText(formatRecapMinLength(mRecapMinLength));
+            mRecapMinLengthRow.value.setVisibility(View.VISIBLE);
+        }
+    }
+
+    private static String formatRecapMinLength(int minLength) {
+        return Config.sanitizeRecapMinLength(minLength) + " 字";
     }
 
     private void setPriorityVisual(boolean enabled, boolean animate) {
@@ -653,6 +779,7 @@ public final class MainActivity extends Activity implements ModelDownloadManager
         }
         boolean xiaoAi = Config.isXiaoAiGlow(normalized);
         if (mSummaryPreview != null) mSummaryPreview.setGlowStyle(xiaoAi, replayDemo);
+        if (mRecapPreview != null) mRecapPreview.setGlowStyle(xiaoAi, replayDemo);
         if (mPriorityPreview != null) mPriorityPreview.setGlowStyle(xiaoAi, replayDemo);
         if (mReducePreview != null) mReducePreview.setGlowStyle(xiaoAi, replayDemo);
         if (mPromotionPreview != null) mPromotionPreview.setGlowStyle(xiaoAi, replayDemo);
@@ -716,6 +843,64 @@ public final class MainActivity extends Activity implements ModelDownloadManager
                     applyConfigBundle(result, false);
                 } else {
                     renderModelEntry();
+                }
+            });
+        });
+    }
+
+    private void saveRecapEnabled(boolean target) {
+        mRecapBusy = true;
+        if (mRecapRow != null) mRecapRow.row.setClickable(false);
+        OPTION_IO.execute(() -> {
+            Bundle result = null;
+            try {
+                Bundle input = new Bundle();
+                input.putBoolean(Config.KEY_NOTIFICATION_RECAP, target);
+                result = getContentResolver().call(PROVIDER, Config.METHOD_SET_CONFIG, null, input);
+                if (result != null && !"0".equals(result.getString("status"))) {
+                    result = null;
+                }
+            } catch (RuntimeException ignored) {
+            }
+            Bundle finalResult = result;
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                mRecapBusy = false;
+                if (mRecapRow != null) mRecapRow.row.setClickable(true);
+                if (finalResult != null) {
+                    applyConfigBundle(finalResult, true);
+                } else {
+                    setRecapVisual(!target, true);
+                    Toast.makeText(this, "无法保存 AI 概括设置", Toast.LENGTH_SHORT).show();
+                }
+            });
+        });
+    }
+
+    private void saveRecapMinLength(int target, int previous) {
+        mRecapMinLengthBusy = true;
+        if (mRecapMinLengthRow != null) mRecapMinLengthRow.row.setClickable(false);
+        OPTION_IO.execute(() -> {
+            Bundle result = null;
+            try {
+                Bundle input = new Bundle();
+                input.putInt(Config.KEY_RECAP_MIN_LENGTH, target);
+                result = getContentResolver().call(PROVIDER, Config.METHOD_SET_CONFIG, null, input);
+                if (result != null && !"0".equals(result.getString("status"))) {
+                    result = null;
+                }
+            } catch (RuntimeException ignored) {
+            }
+            Bundle finalResult = result;
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                mRecapMinLengthBusy = false;
+                if (mRecapMinLengthRow != null) mRecapMinLengthRow.row.setClickable(true);
+                if (finalResult != null) {
+                    applyConfigBundle(finalResult, false);
+                } else {
+                    setRecapMinLengthVisual(previous);
+                    Toast.makeText(this, "无法保存触发字数门槛设置", Toast.LENGTH_SHORT).show();
                 }
             });
         });
@@ -881,9 +1066,17 @@ public final class MainActivity extends Activity implements ModelDownloadManager
             boolean enabled = config.getBoolean(Config.KEY_PROMOTION_FILTER, Config.DEFAULT_PROMOTION_FILTER);
             setPromotionVisual(enabled, animate);
         }
-        if (mRecapRow != null && mRecapRow.row.isClickable()) {
-            mRecapRow.toggle.setChecked(config.getBoolean(
-                    Config.KEY_NOTIFICATION_RECAP, Config.DEFAULT_NOTIFICATION_RECAP), animate);
+        if (!mRecapBusy) {
+            boolean recap = config.getBoolean(Config.KEY_NOTIFICATION_RECAP, Config.DEFAULT_NOTIFICATION_RECAP);
+            setRecapVisual(recap, animate);
+        }
+        if (mRecapScreenOnRow != null && mRecapScreenOnRow.row.isClickable()) {
+            mRecapScreenOnRow.toggle.setChecked(config.getBoolean(
+                    Config.KEY_RECAP_SCREEN_ON, Config.DEFAULT_RECAP_SCREEN_ON), animate);
+        }
+        if (!mRecapMinLengthBusy) {
+            setRecapMinLengthVisual(config.getInt(
+                    Config.KEY_RECAP_MIN_LENGTH, Config.DEFAULT_RECAP_MIN_LENGTH));
         }
         boolean priority = config.getBoolean(Config.KEY_PRIORITY_ENABLED, Config.DEFAULT_PRIORITY_ENABLED);
         boolean summary = config.getBoolean(Config.KEY_GROUP_SUMMARY, Config.DEFAULT_GROUP_SUMMARY);

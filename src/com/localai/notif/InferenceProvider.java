@@ -253,6 +253,10 @@ public final class InferenceProvider extends ContentProvider {
                 prefs.getBoolean(Config.KEY_GROUP_SUMMARY, Config.DEFAULT_GROUP_SUMMARY));
         out.putBoolean(Config.KEY_NOTIFICATION_RECAP,
                 prefs.getBoolean(Config.KEY_NOTIFICATION_RECAP, Config.DEFAULT_NOTIFICATION_RECAP));
+        out.putBoolean(Config.KEY_RECAP_SCREEN_ON,
+                prefs.getBoolean(Config.KEY_RECAP_SCREEN_ON, Config.DEFAULT_RECAP_SCREEN_ON));
+        out.putInt(Config.KEY_RECAP_MIN_LENGTH, Config.sanitizeRecapMinLength(
+                prefs.getInt(Config.KEY_RECAP_MIN_LENGTH, Config.DEFAULT_RECAP_MIN_LENGTH)));
         out.putBoolean(Config.KEY_CLASSIFY_ENABLED, prefs.getBoolean(
                 Config.KEY_CLASSIFY_ENABLED, Config.DEFAULT_CLASSIFY_ENABLED));
         out.putBoolean(Config.KEY_PRIORITY_ENABLED, prefs.getBoolean(
@@ -344,6 +348,17 @@ public final class InferenceProvider extends ContentProvider {
         }
         if (input.containsKey(Config.KEY_NOTIFICATION_RECAP)) {
             editor.putBoolean(Config.KEY_NOTIFICATION_RECAP, input.getBoolean(Config.KEY_NOTIFICATION_RECAP));
+            changed = true;
+            notifySystem = true;
+        }
+        if (input.containsKey(Config.KEY_RECAP_SCREEN_ON)) {
+            editor.putBoolean(Config.KEY_RECAP_SCREEN_ON, input.getBoolean(Config.KEY_RECAP_SCREEN_ON));
+            changed = true;
+            notifySystem = true;
+        }
+        if (input.containsKey(Config.KEY_RECAP_MIN_LENGTH)) {
+            int recapMinLength = Config.sanitizeRecapMinLength(input.getInt(Config.KEY_RECAP_MIN_LENGTH));
+            editor.putInt(Config.KEY_RECAP_MIN_LENGTH, recapMinLength);
             changed = true;
             notifySystem = true;
         }
@@ -590,7 +605,13 @@ public final class InferenceProvider extends ContentProvider {
     private Bundle summarizeRecap(Bundle input) {
         if (input == null) return error("no input");
         String body = input.getString(NotificationRecap.BODY, "");
-        if (body.length() > NotificationRecap.MAX_INPUT_LENGTH || !NotificationRecap.isLong(body)) {
+        SharedPreferences prefs = getContext().getSharedPreferences(Config.PREFS_NAME, Context.MODE_PRIVATE);
+        int configuredMinLength = Config.sanitizeRecapMinLength(
+                prefs.getInt(Config.KEY_RECAP_MIN_LENGTH, Config.DEFAULT_RECAP_MIN_LENGTH));
+        int minLength = input.containsKey(NotificationRecap.MIN_LENGTH)
+                ? Config.sanitizeRecapMinLength(input.getInt(NotificationRecap.MIN_LENGTH, configuredMinLength))
+                : configuredMinLength;
+        if (body.length() > NotificationRecap.MAX_INPUT_LENGTH || !NotificationRecap.isLong(body, minLength)) {
             return error("invalid recap body");
         }
         String title = LlmEngine.clip(safe(input.getString(NotificationRecap.TITLE)), 120);

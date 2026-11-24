@@ -33,7 +33,7 @@
 | `textSecondary` | `#8C000000` | `#8CFFFFFF` | 选项副标题、分组小标题、底部说明文字 |
 | `textTertiary` | `#66000000` | `#66FFFFFF` | 次级辅助信息/图标 |
 | `divider` | `#14000000` | `#1AFFFFFF` | 吸顶栏底部分割线、同卡多项内部分割线 |
-| 超级小爱流光锚点（默认光效风格） | 暖橙 `#F26D1F` / 玫粉 `#E52B7A` / 紫罗兰 `#8C46F2` / 钴蓝 `#1E78F5` | 暖橙 `#FF9238` / 玫粉 `#FF408A` / 紫罗兰 `#B86BFF` / 电光蓝 `#3694FF` | 默认光效，复刻澎湃超级小爱超级岛霓虹流光；覆盖重要通知、AI 摘要、减少干扰超级岛与全部 4 组设置示意图 |
+| 超级小爱流光锚点（默认光效风格） | 暖橙 `#F26D1F` / 玫粉 `#E52B7A` / 紫罗兰 `#8C46F2` / 钴蓝 `#1E78F5` | 暖橙 `#FF9238` / 玫粉 `#FF408A` / 紫罗兰 `#B86BFF` / 电光蓝 `#3694FF` | 默认光效，复刻澎湃超级小爱超级岛霓虹流光；覆盖重要通知、AI 摘要、AI 概括、减少干扰超级岛与全部 5 组设置示意图 |
 | 星云极光锚点（可选光效风格） | 天青 `#1CA3EC` / 晴空 `#2B75F0` / 冰紫 `#7458F2` / 霜白微胶囊 | 天青 `#5CE1FF` / 晴空 `#3D8BFF` / 冰紫 `#A17DFF` / 烟熏微胶囊 | 经典冷色调液态玻璃风格，可在「其他 → 光效风格」实时热切换 |
 
 ### 2. 版式、对齐与超椭圆几何
@@ -64,7 +64,7 @@
   - 防闪烁并发保护：IPC 期间用 `mBusy` + `setClickable(false)` 防重入，不临时降低开关透明度；已在目标方向运行中的动画不被极速返回的 IPC 打断重启；保存失败时再平滑回滚并弹出 `Toast`。
   - 尊重无障碍减弱动效：所有动画均检测 `ValueAnimator.areAnimatorsEnabled()`，并在 `onDetachedFromWindow()` 中及时取消。
 - **卡片按压反馈**：使用 `HyperSettingsUi.createCardBackground(..., interactive = true)` 生成 `StateListDrawable`（`40ms` 淡入 / `120ms` 淡出，支持 `state_pressed` 与 `state_focused`），不要使用 Material 圆形扩散水波纹。
-- **功能示意图卡片（`SummaryPreviewView` / `PriorityPreviewView` / `PromotionPreviewView` / `ReducePreviewView`）**：统一收归 `HyperSettingsUi` 内静态类，包裹在 `padding(16, 16, 16, 4)` 的 `FrameLayout` 中并限宽 `320dp` 居中绘 `14dp` 超椭圆画布（`previewStageBg` + `1dp` 细边）；使用超椭圆骨架卡片（图标超椭圆 + 圆角骨架条，不写假通知正文）与 `280ms` `HYPER_EASE` 开关实时联动动效。
+- **功能示意图卡片（`SummaryPreviewView` / `RecapPreviewView` / `PriorityPreviewView` / `PromotionPreviewView` / `ReducePreviewView`）**：统一收归 `HyperSettingsUi` 内静态类，包裹在 `padding(16, 16, 16, 4)` 的 `FrameLayout` 中并限宽 `320dp` 居中绘 `14dp` 超椭圆画布（`previewStageBg` + `1dp` 细边）；使用超椭圆骨架卡片（图标超椭圆 + 圆角骨架条，不写假通知正文）与 `280ms` `HYPER_EASE` 开关实时联动动效。
 
 ### 5. 窗口主题与 Edge-to-Edge 规范
 

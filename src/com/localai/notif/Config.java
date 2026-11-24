@@ -42,6 +42,11 @@ public final class Config {
     static final String KEY_INCLUDE_ITEM_SUMMARIES = "include_item_summaries";
     static final String KEY_NOTIFICATION_RECAP = "notification_recap";
     static final boolean DEFAULT_NOTIFICATION_RECAP = false;
+    public static final String KEY_RECAP_SCREEN_ON = "recap_screen_on";
+    public static final boolean DEFAULT_RECAP_SCREEN_ON = true;
+    public static final String KEY_RECAP_MIN_LENGTH = "recap_min_length";
+    public static final int DEFAULT_RECAP_MIN_LENGTH = 80;
+    static final int[] RECAP_MIN_LENGTH_OPTIONS = {50, 80, 120, 200};
 
     public static final String KEY_DOWNLOAD_SOURCE = "download_source";
     public static final String DOWNLOAD_SOURCE_MODELSCOPE = "modelscope";
@@ -61,8 +66,8 @@ public final class Config {
     public static final String ACTION_GLOW_STYLE_CHANGED = "com.localai.notif.GLOW_STYLE_CHANGED";
     public static final String EXTRA_FROM_SYSTEM_SETTINGS = "localai_from_system_settings";
     public static final String LAUNCHER_ALIAS_CLASS = "com.localai.notif.MainActivityLauncher";
-    static final int MODULE_VERSION_CODE = 22;
-    static final String MODULE_VERSION_NAME = "1.2.0";
+    static final int MODULE_VERSION_CODE = 23;
+    static final String MODULE_VERSION_NAME = "2.0.0";
     static final String KEY_MODEL_READY = "model_ready";
     static final String KEY_ENGINE_LOADED = "engine_loaded";
     static final String KEY_ENGINE_LOADING = "engine_loading";
@@ -83,6 +88,13 @@ public final class Config {
 
     static boolean isXiaoAiGlow(String raw) {
         return !GLOW_STYLE_NEBULA.equals(raw);
+    }
+
+    static int sanitizeRecapMinLength(int value) {
+        for (int option : RECAP_MIN_LENGTH_OPTIONS) {
+            if (option == value) return option;
+        }
+        return DEFAULT_RECAP_MIN_LENGTH;
     }
 
     private Config() {}
