@@ -13,6 +13,7 @@ import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.PorterDuff;
 import android.graphics.PorterDuffXfermode;
+import android.graphics.Rect;
 import android.graphics.Shader;
 import android.graphics.Typeface;
 import android.os.Bundle;
@@ -21,6 +22,8 @@ import android.service.notification.StatusBarNotification;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.TextUtils;
+import android.text.style.ForegroundColorSpan;
+import android.text.style.LeadingMarginSpan;
 import android.text.style.ReplacementSpan;
 import android.util.Log;
 import android.util.TypedValue;
@@ -28,12 +31,14 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
+import android.view.ViewTreeObserver;
 import android.view.animation.AccelerateInterpolator;
 import android.view.animation.DecelerateInterpolator;
 import android.view.animation.LinearInterpolator;
 import android.view.animation.PathInterpolator;
 import android.widget.TextView;
 
+import java.lang.ref.WeakReference;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
@@ -44,11 +49,16 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.WeakHashMap;
+import java.util.regex.Pattern;
+
+import static com.localai.notif.SystemUiPrioritySection.requireField;
+import static com.localai.notif.SystemUiPrioritySection.requireMethod;
 
 /**
  * Renders the Nebula Aurora AI summary presentation over collapsed notification group slots inside
- * NotificationChildrenContainer while keeping native card surfaces, heights, clipping, and
- * priority frames completely untouched:
+ * NotificationChildrenContainer, dynamically adapting the collapsed card height to fit the full
+ * summary text without truncation while keeping native card surfaces, icons, clipping, and
+ * priority frames seamlessly aligned:
  * <ul>
  *   <li><b>Thinking Scanlight</b>: While local LLM inference is actively running ({@code inFlight}),
  *       original single-line notifications remain 100% readable while a softly feathered, 14-degree
@@ -73,6 +83,9 @@ import java.util.WeakHashMap;
  */
 final class SystemUiGroupText {
     private static final String TAG = "LocalAiNotif";
+    static final int MAX_ADAPTIVE_LINES = 7;
+    private static final Pattern GROUP_PREFIX_PATTERN =
+            Pattern.compile("^.+?\\s+\\d+\\s*条(?:新)?通知\\s*[:：]\\s*");
     private static final int MAX_REVEALED_CACHE = 64;
     private static final long REVISIT_HIDDEN_DEBOUNCE_MS = 450L;
     private static final long REVISIT_GLINT_COOLDOWN_MS = 1200L;
@@ -87,6 +100,8 @@ final class SystemUiGroupText {
     private final Method getSingleLine;
     private final Method shouldShowPublic;
     private final Method isGroupExpansionChanging;
+    private final Method notifyHeightChanged;
+    private final Method setMeasuredDimensionMethod;
     private final Method showingAsLowPriority;
     private final Method isBundle;
     private final Method getCollapsedHeaderMargin;
@@ -97,18 +112,24 @@ final class SystemUiGroupText {
     private final Field sbnField;
     private final Field showingPublic;
     private final Field containingRow;
+    private final Field attachedChildrenField;
     private final Field childrenExpandedField;
+    private final Field userSwipingField;
     private final Field childPaddingField;
     private final Field headerTranslationField;
     private final Field minSingleLineHeightField;
+    private final Field collapsedBottomPaddingField;
+    private final Field realHeightField;
     private final Field overflowNumberField;
     private final Field injectorField;
     private final Field overflowMarginEndField;
+    private final Field miuiAppIconSizeField;
     private final TimeInterpolator expandInterpolator;
     private final TimeInterpolator collapseInterpolator;
 
-    private final WeakHashMap<ViewGroup, OverlayState> overlays = new WeakHashMap<>();
+    private final WeakHashMap<ViewGroup, WeakReference<OverlayState>> overlays = new WeakHashMap<>();
     private final Set<View> hiddenHybrids = Collections.newSetFromMap(new WeakHashMap<>());
+    private final Runnable glowStyleListener = this::onGlowStyleChanged;
     private final Map<String, String> revealedSummaries = new LinkedHashMap<>(32, 0.75f, true) {
         @Override
         protected boolean removeEldestEntry(Map.Entry<String, String> eldest) {
@@ -145,37 +166,47 @@ final class SystemUiGroupText {
         Class<?> entryClass = loader.loadClass(
                 "com.android.systemui.statusbar.notification.collection.NotificationEntry");
 
-        getEntry = ModuleMain.findMethod(rowClass, "getEntry");
-        getChildren = ModuleMain.findMethod(rowClass, "getAttachedChildren");
-        getParent = ModuleMain.findMethod(rowClass, "getNotificationParent");
-        getChildrenContainer = ModuleMain.findMethod(rowClass, "getChildrenContainer");
-        getSingleLine = ModuleMain.findMethod(rowClass, "getSingleLineView");
-        shouldShowPublic = ModuleMain.findMethod(rowClass, "shouldShowPublic");
+        getEntry = requireMethod(rowClass, "getEntry");
+        getChildren = requireMethod(rowClass, "getAttachedChildren");
+        getParent = requireMethod(rowClass, "getNotificationParent");
+        getChildrenContainer = requireMethod(rowClass, "getChildrenContainer");
+        getSingleLine = requireMethod(rowClass, "getSingleLineView");
+        shouldShowPublic = requireMethod(rowClass, "shouldShowPublic");
         showingPublic = ModuleMain.findField(rowClass, "mShowingPublic");
         isGroupExpansionChanging = ModuleMain.findMethod(rowClass, "isGroupExpansionChanging");
-        sbnField = ModuleMain.findField(entryClass, "mSbn");
+        notifyHeightChanged = ModuleMain.findMethod(rowClass, "notifyHeightChanged", String.class, boolean.class);
+        setMeasuredDimensionMethod = ModuleMain.findMethod(View.class, "setMeasuredDimension", int.class, int.class);
+        sbnField = requireField(entryClass, "mSbn");
 
-        containingRow = ModuleMain.findField(containerClass, "mContainingNotification");
+        containingRow = requireField(containerClass, "mContainingNotification");
+        attachedChildrenField = ModuleMain.findField(containerClass, "mAttachedChildren");
         childrenExpandedField = ModuleMain.findField(containerClass, "mChildrenExpanded");
-        childPaddingField = ModuleMain.findField(containerClass, "mChildPadding");
-        headerTranslationField = ModuleMain.findField(containerClass, "mCurrentHeaderTranslation");
-        minSingleLineHeightField = ModuleMain.findField(containerClass, "mMinSingleLineHeight");
-        overflowNumberField = ModuleMain.findField(containerClass, "mOverflowNumber");
+        userSwipingField = ModuleMain.findField(containerClass, "mIsUserSwipingToExpandRow");
+        childPaddingField = requireField(containerClass, "mChildPadding");
+        headerTranslationField = requireField(containerClass, "mCurrentHeaderTranslation");
+        minSingleLineHeightField = requireField(containerClass, "mMinSingleLineHeight");
+        collapsedBottomPaddingField = ModuleMain.findField(containerClass, "mCollapsedBottomPadding");
+        realHeightField = ModuleMain.findField(containerClass, "mRealHeight");
+        overflowNumberField = requireField(containerClass, "mOverflowNumber");
         injectorField = ModuleMain.findField(containerClass, "mInjector");
         Field marginEnd = null;
+        Field appIconSize = null;
         if (injectorField != null) {
-            marginEnd = ModuleMain.findField(injectorField.getType(), "mOverflowNumberMarginEnd");
+            Class<?> injectorType = injectorField.getType();
+            marginEnd = ModuleMain.findField(injectorType, "mOverflowNumberMarginEnd");
+            appIconSize = ModuleMain.findField(injectorType, "mMiuiAppIconSize");
         }
         overflowMarginEndField = marginEnd;
+        miuiAppIconSizeField = appIconSize;
 
-        showingAsLowPriority = ModuleMain.findMethod(containerClass, "showingAsLowPriority");
+        showingAsLowPriority = requireMethod(containerClass, "showingAsLowPriority");
         isBundle = ModuleMain.findMethod(containerClass, "isBundle");
-        getCollapsedHeaderMargin = ModuleMain.findMethod(containerClass, "getCollapsedHeaderMargin");
-        getMaxAllowedVisibleChildren = ModuleMain.findMethod(
+        getCollapsedHeaderMargin = requireMethod(containerClass, "getCollapsedHeaderMargin");
+        getMaxAllowedVisibleChildren = requireMethod(
                 containerClass, "getMaxAllowedVisibleChildren", boolean.class);
 
-        getHybridTextView = ModuleMain.findMethod(hybridClass, "getTextView");
-        getHybridTitleView = ModuleMain.findMethod(hybridClass, "getTitleView");
+        getHybridTextView = requireMethod(hybridClass, "getTextView");
+        getHybridTitleView = requireMethod(hybridClass, "getTitleView");
 
         Method miuiStyleMethod = null;
         try {
@@ -199,7 +230,32 @@ final class SystemUiGroupText {
 
         hookHybridView(hybridClass);
         hookContainer(containerClass);
+        hookContainerHeight(containerClass);
         hookRow(rowClass);
+        GlowStyle.addListener(glowStyleListener);
+    }
+
+    private void onGlowStyleChanged() {
+        boolean xiaoAi = GlowStyle.isXiaoAi();
+        List<ViewGroup> snapshot = new ArrayList<>(overlays.keySet());
+        for (ViewGroup container : snapshot) {
+            OverlayState state = overlayFor(container);
+            if (state == null) continue;
+            state.view.setGlowStyle(xiaoAi);
+            if (state.mode == Mode.NONE) continue;
+            try {
+                Object parent = containingRow.get(container);
+                if (parent != null) {
+                    update(parent);
+                    if (state.mode == Mode.SUMMARY && container.isShown()
+                            && state.view.getVisibility() == View.VISIBLE && !state.view.isWashAnimating()) {
+                        state.view.startBadgeGlint(550L, 0.78f);
+                    }
+                }
+            } catch (Throwable e) {
+                module.log(Log.WARN, TAG, "Failed to live-refresh group summary glow style", e);
+            }
+        }
     }
 
     private void hookHybridView(Class<?> hybridClass) {
@@ -226,7 +282,7 @@ final class SystemUiGroupText {
                     List<?> children = (List<?>) getChildren.invoke(parent);
                     if (children == null || children.isEmpty() || children.get(0) != row) return result;
                     ViewGroup container = (ViewGroup) getChildrenContainer.invoke(parent);
-                    OverlayState state = container == null ? null : overlays.get(container);
+                    OverlayState state = overlayFor(container);
                     if (state == null || state.mode == Mode.NONE) return result;
 
                     if (name.equals("setVisible")) {
@@ -262,22 +318,42 @@ final class SystemUiGroupText {
                     && !name.equals("onConfigurationChanged")) continue;
             method.setAccessible(true);
             module.hook(method).intercept(chain -> {
+                if (name.equals("onMeasure")) {
+                    try {
+                        ViewGroup container = (ViewGroup) chain.getThisObject();
+                        OverlayState preState = overlayFor(container);
+                        if (preState != null && preState.mode == Mode.SUMMARY
+                                && preState.view.getVisibility() != View.GONE) {
+                            int preWidth = View.MeasureSpec.getSize((Integer) chain.getArg(0));
+                            if (preWidth > 0 && (preState.adaptiveHeight <= 0
+                                    || preState.measuredWidth != preWidth
+                                    || preState.measuredTextVersion != preState.textVersion)) {
+                                measureOverlay(container, preState, preWidth, false, true);
+                            }
+                        }
+                    } catch (Exception e) {
+                        module.log(Log.ERROR, TAG, "Failed pre-measuring adaptive summary height", e);
+                    }
+                }
                 Object result = chain.proceed();
                 try {
                     ViewGroup container = (ViewGroup) chain.getThisObject();
                     switch (name) {
                         case "onMeasure" -> {
-                            OverlayState state = overlays.get(container);
+                            OverlayState state = overlayFor(container);
                             if (state != null && state.view.getVisibility() != View.GONE) {
-                                int width = View.MeasureSpec.getSize((Integer) chain.getArg(0));
-                                measureOverlay(container, state, width, false);
+                                int widthSpec = (Integer) chain.getArg(0);
+                                int heightSpec = (Integer) chain.getArg(1);
+                                int width = View.MeasureSpec.getSize(widthSpec);
+                                measureOverlay(container, state, width, false, true);
+                                ensureContainerMeasuredHeight(container, state, heightSpec);
                             }
                         }
                         case "onLayout" -> {
-                            OverlayState state = overlays.get(container);
+                            OverlayState state = overlayFor(container);
                             if (state != null && state.view.getVisibility() != View.GONE) {
                                 int width = (Integer) chain.getArg(3) - (Integer) chain.getArg(1);
-                                measureOverlay(container, state, width, true);
+                                measureOverlay(container, state, width, true, true);
                             }
                         }
                         case "removeNotification" -> {
@@ -293,6 +369,57 @@ final class SystemUiGroupText {
                 return result;
             });
         }
+    }
+
+    private void hookContainerHeight(Class<?> containerClass) {
+        for (Method method : containerClass.getDeclaredMethods()) {
+            String name = method.getName();
+            if (method.getParameterCount() != 0) continue;
+            boolean intrinsic = name.equals("getIntrinsicHeight");
+            boolean collapsedNoHeader = name.equals("getCollapsedHeightWithoutHeader");
+            if (!intrinsic && !collapsedNoHeader
+                    && !name.equals("getCollapsedHeight")
+                    && !name.equals("getMinHeight")) continue;
+            method.setAccessible(true);
+            module.hook(method).intercept(chain -> {
+                ViewGroup container = (ViewGroup) chain.getThisObject();
+                OverlayState state = overlayFor(container);
+                if (state == null || state.mode != Mode.SUMMARY || state.adaptiveHeight <= 0) {
+                    return chain.proceed();
+                }
+                try {
+                    if (intrinsic) {
+                        if (childrenExpandedField != null && childrenExpandedField.getBoolean(container)) {
+                            return chain.proceed();
+                        }
+                        if (userSwipingField != null && userSwipingField.getBoolean(container)) {
+                            return chain.proceed();
+                        }
+                    }
+                    if (!canUseAdaptiveCollapsedHeight(container)) {
+                        return chain.proceed();
+                    }
+                    if (collapsedNoHeader) {
+                        return Math.max(1, state.adaptiveHeight - headerTranslationField.getInt(container));
+                    }
+                    return state.adaptiveHeight;
+                } catch (Exception e) {
+                    module.log(Log.ERROR, TAG, "Failed in adaptive height hook: " + name, e);
+                    return chain.proceed();
+                }
+            });
+        }
+    }
+
+    private boolean canUseAdaptiveCollapsedHeight(ViewGroup container) throws Exception {
+        if ((Boolean) showingAsLowPriority.invoke(container)) return false;
+        if (isBundle != null && (Boolean) isBundle.invoke(container)) return false;
+        if (attachedChildrenField != null
+                && attachedChildrenField.get(container) instanceof List<?> list && list.size() < 2) {
+            return false;
+        }
+        Object parent = containingRow.get(container);
+        return parent != null && !needsPublicView(parent);
     }
 
     private void hookRow(Class<?> rowClass) {
@@ -364,19 +491,36 @@ final class SystemUiGroupText {
         boolean hasSummaryCandidate = summaryText != null && !summaryText.isBlank() && summaryFp != null;
         boolean hasThinkingCandidate = thinkingFp != null && !thinkingFp.isBlank();
         if (!hasSummaryCandidate && !hasThinkingCandidate) return GroupState.NONE;
-        if (needsPublicView(parent, children)) return GroupState.NONE;
+        if (needsPublicView(parent)) return GroupState.NONE;
 
         boolean priorityGroup = PriorityNotification.isGroupSummary(summary);
-        ArrayList<StatusBarNotification> active = new ArrayList<>(children.size());
-        for (Object child : children) {
+        OverlayState overlay = overlayFor(container);
+        ArrayList<StatusBarNotification> active = overlay == null
+                ? new ArrayList<>(children.size()) : overlay.versionChildren;
+        if (active.size() != children.size()) {
+            active.clear();
+            if (overlay != null) overlay.versionFingerprint = null;
+        }
+        for (int index = 0; index < children.size(); index++) {
+            Object child = children.get(index);
+            if (needsPublicView(child)) return GroupState.NONE;
             StatusBarNotification notification = sbn(child);
             if (notification == null || !summary.getGroupKey().equals(notification.getGroupKey())) {
                 return GroupState.NONE;
             }
             if (priorityGroup && !PriorityNotification.isMarked(notification)) return GroupState.NONE;
-            active.add(notification);
+            if (index == active.size()) {
+                active.add(notification);
+            } else if (active.get(index) != notification) {
+                active.set(index, notification);
+                overlay.versionFingerprint = null;
+            }
         }
-        String currentFp = GroupSummaryData.versionFingerprint(active);
+        String currentFp = overlay != null ? overlay.versionFingerprint : null;
+        if (currentFp == null) {
+            currentFp = GroupSummaryData.versionFingerprint(active);
+            if (overlay != null) overlay.versionFingerprint = currentFp;
+        }
         if (hasSummaryCandidate && currentFp.equals(summaryFp)) {
             return new GroupState(Mode.SUMMARY, summary.getGroupKey(), currentFp, summaryText);
         }
@@ -399,7 +543,7 @@ final class SystemUiGroupText {
 
         GroupState resolved = resolveState(container, parent, children);
         if (resolved.mode == Mode.NONE) {
-            clearOverlay(overlays.get(container), children);
+            clearOverlay(container, parent, overlayFor(container), children, false);
             return;
         }
 
@@ -417,12 +561,14 @@ final class SystemUiGroupText {
                 restoreSingleLine((View) getSingleLine.invoke(children.get(i)));
             }
             state.rawText = null;
-            state.view.setText(null);
-            state.view.setContentDescription(null);
+            if (state.view.length() != 0) state.view.setText(null);
+            if (state.view.getContentDescription() != null) state.view.setContentDescription(null);
+            syncAdaptiveHeight(container, parent, state, 0, false);
 
             TextView refText = (TextView) getHybridTextView.invoke(hybrid0);
             boolean darkSurface = detectDarkSurface(container, refText);
             boolean visible = hybrid0.getVisibility() == View.VISIBLE;
+            state.view.setGlowStyle(GlowStyle.isXiaoAi());
             state.view.enterThinkingMode(darkSurface, container.isShown() && visible);
 
             if (!state.animating) {
@@ -444,7 +590,7 @@ final class SystemUiGroupText {
                 && hybrid0.getVisibility() == View.VISIBLE
                 && ValueAnimator.areAnimatorsEnabled();
 
-        syncStyleAndText(container, state, hybrid0, resolved.summaryText, slots);
+        syncStyleAndText(container, state, hybrid0, resolved.summaryText, MAX_ADAPTIVE_LINES);
 
         if (canAnimateWash) {
             state.view.setWashProgressListener(p -> applyHybridWashAlpha(container, p));
@@ -477,11 +623,51 @@ final class SystemUiGroupText {
 
     private void layoutOrRequest(ViewGroup container, OverlayState state) throws Exception {
         if (container.getWidth() > 0) {
-            measureOverlay(container, state, container.getWidth(), true);
-            container.invalidate();
-        } else {
-            container.requestLayout();
+            measureOverlay(container, state, container.getWidth(), true, false);
+            return;
         }
+        if (state.mode == Mode.SUMMARY) {
+            int fallbackWidth = resolveFallbackWidth(container, containingRow.get(container));
+            if (fallbackWidth > 0) {
+                measureOverlay(container, state, fallbackWidth, false, false);
+            }
+        }
+        container.requestLayout();
+    }
+
+    private static int resolveFallbackWidth(ViewGroup container, Object parent) {
+        int w = container.getMeasuredWidth();
+        if (w > 0) return w;
+        if (parent instanceof View parentView) {
+            w = parentView.getWidth();
+            if (w > 0) return w;
+            w = parentView.getMeasuredWidth();
+            if (w > 0) return w;
+            if (parentView.getParent() instanceof View stackView) {
+                int stackW = stackView.getWidth()
+                        - stackView.getPaddingLeft() - stackView.getPaddingRight();
+                if (stackW > 0) return stackW;
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * Computes {@code child}'s top offset inside {@code ancestor} using unscaled local view
+     * hierarchy coordinates (immune to parent row {@code scaleY} / {@code extScaleY} during
+     * HyperOS panel pull-down animations).
+     */
+    private static int localTopInAncestor(View child, ViewGroup ancestor) {
+        if (child == null || ancestor == null) return -1;
+        float y = 0f;
+        View current = child;
+        while (current != null && current != ancestor) {
+            y += current.getTop() + current.getTranslationY();
+            ViewParent vp = current.getParent();
+            if (!(vp instanceof View parentView)) return -1;
+            current = parentView;
+        }
+        return current == ancestor ? Math.round(y) : -1;
     }
 
     private void applyHybridWashAlpha(ViewGroup container, float washProgress) {
@@ -490,7 +676,7 @@ final class SystemUiGroupText {
             if (parent == null) return;
             List<?> children = (List<?>) getChildren.invoke(parent);
             if (children == null || children.isEmpty()) return;
-            OverlayState state = overlays.get(container);
+            OverlayState state = overlayFor(container);
             int slots = state != null && state.activeSlots > 0
                     ? Math.min(children.size(), state.activeSlots)
                     : Math.min(children.size(), maxCollapsedSlots(container));
@@ -521,12 +707,15 @@ final class SystemUiGroupText {
         }
     }
 
-    private void clearOverlay(OverlayState state, List<?> children) throws ReflectiveOperationException {
-        if (state != null && (state.mode != Mode.NONE || state.rawText != null)) {
+    private void clearOverlay(ViewGroup container, Object parent, OverlayState state,
+            List<?> children, boolean deferHeightNotify) throws ReflectiveOperationException {
+        if (state != null && (state.mode != Mode.NONE || state.rawText != null || state.adaptiveHeight != 0)) {
             cancelExpandAnimation(state);
             state.mode = Mode.NONE;
             state.rawText = null;
             state.activeSlots = 0;
+            state.measuredWidth = 0;
+            state.measuredTextHeight = 0;
             state.wasVisibleOnScreen = false;
             state.view.resetAllVisuals();
             resetRestTransform(state);
@@ -534,15 +723,25 @@ final class SystemUiGroupText {
             state.view.setVisibility(View.GONE);
             state.view.setText(null);
             state.view.setContentDescription(null);
+            state.versionChildren.clear();
+            state.versionFingerprint = null;
+            syncAdaptiveHeight(container, parent, state, 0, deferHeightNotify);
         }
-        if (children != null) {
+        if (children != null && !hiddenHybrids.isEmpty()) {
             for (Object child : children) restoreSingleLine((View) getSingleLine.invoke(child));
         }
     }
 
+    private OverlayState overlayFor(ViewGroup container) {
+        WeakReference<OverlayState> reference = overlays.get(container);
+        OverlayState state = reference == null ? null : reference.get();
+        return state != null && state.view.getParent() == container ? state : null;
+    }
+
     private OverlayState ensureOverlay(ViewGroup container) {
-        OverlayState state = overlays.get(container);
-        if (state != null && state.view.getParent() == container) return state;
+        GlowStyle.initInSystemUi(container.getContext());
+        OverlayState state = overlayFor(container);
+        if (state != null) return state;
         NebulaSummaryView view = new NebulaSummaryView(container.getContext());
         view.setClickable(false);
         view.setLongClickable(false);
@@ -555,35 +754,34 @@ final class SystemUiGroupText {
         view.setLineSpacing(Math.round(2.4f * density), 1f);
         view.setVisibility(View.GONE);
         container.addView(view);
-        OverlayState created = new OverlayState(view);
-        container.getViewTreeObserver().addOnPreDrawListener(() -> {
-            if (created.mode == Mode.NONE) return true;
-            List<?> children = null;
-            boolean canDraw = false;
-            try {
-                Object parent = containingRow.get(container);
-                if (parent != null) {
-                    children = (List<?>) getChildren.invoke(parent);
-                    canDraw = children != null && children.size() >= 2
-                            && !needsPublicView(parent, children);
-                }
-            } catch (Exception e) {
-                module.log(Log.ERROR, TAG, "Failed to check group summary privacy on pre-draw", e);
+        overlays.put(container, new WeakReference<>(view.state));
+        return view.state;
+    }
+
+    private void beforeOverlayDraw(ViewGroup container, OverlayState state) {
+        if (state.mode == Mode.NONE) return;
+        Object parent = null;
+        List<?> children = null;
+        boolean canDraw = false;
+        try {
+            parent = containingRow.get(container);
+            if (parent != null) {
+                children = (List<?>) getChildren.invoke(parent);
+                canDraw = children != null && children.size() >= 2 && !needsPublicView(parent, children);
             }
-            try {
-                if (!canDraw) {
-                    clearOverlay(created, children);
-                } else if (created.view.getVisibility() != View.GONE && container.getWidth() > 0) {
-                    measureOverlay(container, created, container.getWidth(), true);
-                    syncRevisitVisibility(container, created);
-                }
-            } catch (Exception e) {
-                module.log(Log.ERROR, TAG, "Failed to update group summary on pre-draw", e);
+        } catch (Exception e) {
+            module.log(Log.ERROR, TAG, "Failed to check group summary privacy on pre-draw", e);
+        }
+        try {
+            if (!canDraw) {
+                clearOverlay(container, parent, state, children, true);
+            } else if (state.view.getVisibility() != View.GONE && container.getWidth() > 0) {
+                measureOverlay(container, state, container.getWidth(), true, true);
+                syncRevisitVisibility(container, state);
             }
-            return true;
-        });
-        overlays.put(container, created);
-        return created;
+        } catch (Exception e) {
+            module.log(Log.ERROR, TAG, "Failed to update group summary on pre-draw", e);
+        }
     }
 
     private void syncRevisitVisibility(ViewGroup container, OverlayState state) {
@@ -634,30 +832,36 @@ final class SystemUiGroupText {
             String summaryText, int maxLines) throws Exception {
         TextView refText = (TextView) getHybridTextView.invoke(hybrid0);
         boolean darkSurface = detectDarkSurface(container, refText);
+        boolean xiaoAi = GlowStyle.isXiaoAi();
         int baseInk = refText != null ? refText.getCurrentTextColor()
                 : (darkSurface ? 0xD9FFFFFF : 0xCC000000);
-        int tintedInk = NebulaSummaryVisuals.tintSummaryBodyColor(baseInk, darkSurface);
+        int tintedInk = NebulaSummaryVisuals.tintSummaryBodyColor(baseInk, darkSurface, xiaoAi);
 
+        boolean layoutSpecChanged = false;
         if (refText != null) {
             if (state.view.getTextSize() != refText.getTextSize()) {
                 state.view.setTextSize(TypedValue.COMPLEX_UNIT_PX, refText.getTextSize());
+                layoutSpecChanged = true;
             }
             if (state.view.getIncludeFontPadding() != refText.getIncludeFontPadding()) {
                 state.view.setIncludeFontPadding(refText.getIncludeFontPadding());
+                layoutSpecChanged = true;
             }
             Typeface tf = refText.getTypeface();
             Typeface upright = tf != null && tf.isItalic() ? Typeface.create(tf, Typeface.NORMAL) : tf;
             if (!Objects.equals(state.view.getTypeface(), upright)) {
                 state.view.setTypeface(upright);
+                layoutSpecChanged = true;
             }
         }
         if (state.view.getCurrentTextColor() != tintedInk) {
             state.view.setTextColor(tintedInk);
         }
         float density = container.getResources().getDisplayMetrics().density;
-        state.view.setLineSpacing(Math.round(2.4f * density), 1f);
+        state.view.setLineSpacing(Math.round(3.0f * density), 1f);
         if (state.view.getMaxLines() != maxLines) {
             state.view.setMaxLines(maxLines);
+            layoutSpecChanged = true;
         }
 
         Configuration cfg = container.getResources().getConfiguration();
@@ -665,38 +869,236 @@ final class SystemUiGroupText {
         int nightMask = cfg.uiMode & Configuration.UI_MODE_NIGHT_MASK;
         float textSizePx = state.view.getTextSize();
         boolean appearanceChanged = state.darkSurface != darkSurface
+                || state.xiaoAiStyle != xiaoAi
                 || state.fontScale != fontScale
                 || state.nightMask != nightMask
                 || Math.abs(state.textSizePx - textSizePx) > 0.5f;
 
         if (!summaryText.equals(state.rawText) || appearanceChanged) {
+            boolean metricChanged = state.fontScale != fontScale || Math.abs(state.textSizePx - textSizePx) > 0.5f;
             state.rawText = summaryText;
             state.darkSurface = darkSurface;
+            state.xiaoAiStyle = xiaoAi;
             state.fontScale = fontScale;
             state.nightMask = nightMask;
             state.textSizePx = textSizePx;
+            if (metricChanged) state.collapsedTop = 0;
             state.view.setDarkSurface(darkSurface);
-            state.view.setText(state.view.buildSummarySpannable(summaryText));
-            state.view.setContentDescription(NebulaSummaryVisuals.LABEL + "：" + summaryText);
+            state.view.setGlowStyle(xiaoAi);
+            String displayText = formatForDisplay(summaryText, isMiuiStyle());
+            state.view.setText(state.view.buildSummarySpannable(displayText));
+            state.view.setContentDescription(
+                    NebulaSummaryVisuals.LABEL + "：" + summaryText.replace('\n', '；'));
+            layoutSpecChanged = true;
+        }
+        if (layoutSpecChanged) {
+            state.textVersion++;
         }
     }
 
+    static String formatForDisplay(String summaryText, boolean miuiStyle) {
+        if (summaryText == null) return "";
+        String trimmed = summaryText.trim();
+        if (!miuiStyle) return trimmed;
+        String stripped = GROUP_PREFIX_PATTERN.matcher(trimmed).replaceFirst("").trim();
+        return stripped.isEmpty() ? trimmed : stripped;
+    }
+
+    static int computeAdaptiveCardHeight(int textHeight, int topPad, int bottomPad, int minCardHeight) {
+        if (textHeight <= 0) return 0;
+        return Math.max(minCardHeight, topPad + textHeight + bottomPad);
+    }
+
     private void measureOverlay(ViewGroup container, OverlayState state, int containerWidth,
-            boolean layout) throws Exception {
-        int[] rect = bounds(container, state, containerWidth);
+            boolean layout, boolean deferHeightNotify) throws Exception {
+        if (state.mode == Mode.SUMMARY) {
+            measureAdaptiveSummary(container, state, containerWidth, layout, deferHeightNotify);
+            return;
+        }
+        Rect rect = bounds(container, state, containerWidth);
         if (rect == null) return;
-        int w = rect[2] - rect[0];
-        int h = rect[3] - rect[1];
+        int w = rect.width();
+        int h = rect.height();
         if (!layout || state.view.getMeasuredWidth() != w || state.view.getMeasuredHeight() != h) {
             state.view.measure(
                     View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY),
                     View.MeasureSpec.makeMeasureSpec(h, View.MeasureSpec.EXACTLY));
         }
-        if (layout && (state.view.getLeft() != rect[0] || state.view.getTop() != rect[1]
-                || state.view.getRight() != rect[2] || state.view.getBottom() != rect[3])) {
-            state.view.layout(rect[0], rect[1], rect[2], rect[3]);
+        if (layout && (state.view.getLeft() != rect.left || state.view.getTop() != rect.top
+                || state.view.getRight() != rect.right || state.view.getBottom() != rect.bottom)) {
+            state.view.layout(rect.left, rect.top, rect.right, rect.bottom);
         }
         applyScalePivot(state.view, w, h);
+    }
+
+    private void measureAdaptiveSummary(ViewGroup container, OverlayState state, int containerWidth,
+            boolean layout, boolean deferHeightNotify) throws Exception {
+        Object parent = containingRow.get(container);
+        if (parent == null || containerWidth <= 0) return;
+        List<?> children = (List<?>) getChildren.invoke(parent);
+        if (children == null || children.size() < 2) return;
+        View hybrid0 = (View) getSingleLine.invoke(children.get(0));
+        if (hybrid0 == null) return;
+
+        int maxVisible = maxCollapsedSlots(container);
+        boolean rtl = container.getLayoutDirection() == View.LAYOUT_DIRECTION_RTL;
+        int startPad = hybrid0.getPaddingStart();
+        int endPad = hybrid0.getPaddingEnd();
+        int left = rtl ? endPad : startPad;
+        int right = containerWidth - (rtl ? startPad : endPad);
+
+        View overflow = (View) overflowNumberField.get(container);
+        if (overflow != null && overflow.getVisibility() != View.GONE
+                && overflow.getMeasuredWidth() > 0 && children.size() > maxVisible) {
+            int margin = 0;
+            if (injectorField != null && overflowMarginEndField != null) {
+                Object inj = injectorField.get(container);
+                if (inj != null) margin = overflowMarginEndField.getInt(inj);
+            }
+            int indent = overflow.getMeasuredWidth() + margin;
+            if (rtl) left += indent;
+            else right -= indent;
+        }
+        int w = right - left;
+        if (w <= 0) return;
+
+        float density = container.getResources().getDisplayMetrics().density;
+        boolean expanded = childrenExpandedField != null && childrenExpandedField.getBoolean(container);
+        boolean changing = isGroupExpansionChanging != null
+                && (Boolean) isGroupExpansionChanging.invoke(parent);
+        if (!expanded && !changing && container.isShown() && hybrid0.getHeight() > 0) {
+            int measuredTop = localTopInAncestor(hybrid0, container);
+            if (measuredTop > 0 && measuredTop < Math.round(96f * density)) {
+                state.collapsedTop = measuredTop;
+            }
+        }
+
+        boolean miuiStyle = isMiuiStyle();
+        int topPad = state.collapsedTop > 0
+                ? state.collapsedTop
+                : (miuiStyle
+                        ? Math.round(13f * density)
+                        : (Integer) getCollapsedHeaderMargin.invoke(container)
+                                + headerTranslationField.getInt(container));
+        int rawBotPad = collapsedBottomPaddingField != null
+                ? Math.round(collapsedBottomPaddingField.getFloat(container)) : 0;
+        int bottomPad = miuiStyle
+                ? topPad
+                : (rawBotPad > 0 ? rawBotPad : Math.round(14f * density));
+
+        if (state.measuredWidth != w || state.measuredTextVersion != state.textVersion
+                || state.measuredTextHeight <= 0) {
+            state.view.measure(
+                    View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+            state.measuredWidth = w;
+            state.measuredTextVersion = state.textVersion;
+            state.measuredTextHeight = state.view.getMeasuredHeight();
+        }
+        int textH = state.measuredTextHeight;
+        if (textH <= 0) return;
+
+        int minCardH = minAdaptiveCardHeight(container, density, topPad, bottomPad);
+        int adaptiveH = computeAdaptiveCardHeight(textH, topPad, bottomPad, minCardH);
+        int boxH = Math.max(textH, adaptiveH - topPad - bottomPad);
+
+        syncAdaptiveHeight(container, parent, state, adaptiveH, deferHeightNotify);
+
+        if (!layout || state.view.getMeasuredWidth() != w || state.view.getMeasuredHeight() != boxH) {
+            state.view.measure(
+                    View.MeasureSpec.makeMeasureSpec(w, View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(boxH, View.MeasureSpec.EXACTLY));
+        }
+        int bottom = topPad + boxH;
+        state.bounds.set(left, topPad, right, bottom);
+        if (layout && (state.view.getLeft() != left || state.view.getTop() != topPad
+                || state.view.getRight() != right || state.view.getBottom() != bottom)) {
+            state.view.layout(left, topPad, right, bottom);
+        }
+        applyScalePivot(state.view, w, boxH);
+    }
+
+    private int minAdaptiveCardHeight(ViewGroup container, float density, int topPad, int bottomPad) {
+        if (!isMiuiStyle()) {
+            int singleH = 0;
+            try {
+                singleH = minSingleLineHeightField.getInt(container);
+            } catch (Throwable ignored) {}
+            return topPad + Math.max(singleH, Math.round(20f * density)) + bottomPad;
+        }
+        int iconSpan = Math.round(40f * density);
+        try {
+            if (injectorField != null) {
+                Object inj = injectorField.get(container);
+                if (inj != null && miuiAppIconSizeField != null) {
+                    int sz = miuiAppIconSizeField.getInt(inj);
+                    if (sz > 0) iconSpan = sz;
+                }
+            }
+        } catch (Throwable ignored) {}
+        return Math.max(Math.round(64f * density), iconSpan + Math.round(30f * density));
+    }
+
+    private void syncAdaptiveHeight(ViewGroup container, Object parent, OverlayState state,
+            int nextHeight, boolean deferNotify) {
+        state.adaptiveHeight = nextHeight;
+        if (state.reportedAdaptiveHeight == nextHeight) return;
+        state.reportedAdaptiveHeight = nextHeight;
+        if (container == null) return;
+        if (deferNotify || container.isInLayout()) {
+            if (!container.isAttachedToWindow()) {
+                container.requestLayout();
+                return;
+            }
+            if (!state.heightNotifyScheduled) {
+                state.heightNotifyScheduled = true;
+                container.post(() -> {
+                    state.heightNotifyScheduled = false;
+                    try {
+                        notifyRowHeightChanged(container, containingRow.get(container));
+                    } catch (Throwable e) {
+                        module.log(Log.WARN, TAG, "Failed to post adaptive summary height update", e);
+                    }
+                });
+            }
+        } else {
+            notifyRowHeightChanged(container, parent);
+        }
+    }
+
+    private void notifyRowHeightChanged(ViewGroup container, Object parent) {
+        container.requestLayout();
+        if (notifyHeightChanged == null || parent == null) return;
+        try {
+            boolean animate = container.isShown()
+                    && !PriorityShadeRevealAnimator.isPanelOpening()
+                    && ValueAnimator.areAnimatorsEnabled();
+            notifyHeightChanged.invoke(parent, "LocalAiNotif.summary", animate);
+        } catch (Throwable e) {
+            module.log(Log.WARN, TAG, "Failed to notify row height change", e);
+        }
+    }
+
+    private void ensureContainerMeasuredHeight(ViewGroup container, OverlayState state, int heightSpec) {
+        if (state.mode != Mode.SUMMARY || state.adaptiveHeight <= 0) return;
+        int measuredH = container.getMeasuredHeight();
+        if (measuredH >= state.adaptiveHeight) return;
+        int mode = View.MeasureSpec.getMode(heightSpec);
+        int specSize = View.MeasureSpec.getSize(heightSpec);
+        int targetH = mode == View.MeasureSpec.EXACTLY
+                ? specSize
+                : (mode == View.MeasureSpec.AT_MOST ? Math.min(specSize, state.adaptiveHeight) : state.adaptiveHeight);
+        if (targetH <= measuredH) return;
+        try {
+            if (realHeightField != null && realHeightField.getInt(container) < state.adaptiveHeight) {
+                realHeightField.setInt(container, state.adaptiveHeight);
+            }
+            if (setMeasuredDimensionMethod != null) {
+                setMeasuredDimensionMethod.invoke(container, container.getMeasuredWidth(), targetH);
+            }
+        } catch (Throwable e) {
+            module.log(Log.WARN, TAG, "Failed to expand container measured height", e);
+        }
     }
 
     private static void applyScalePivot(View view, int w, int h) {
@@ -706,7 +1108,7 @@ final class SystemUiGroupText {
         view.setPivotY(h * 0.5f);
     }
 
-    private int[] bounds(ViewGroup container, OverlayState state, int containerWidth) throws Exception {
+    private Rect bounds(ViewGroup container, OverlayState state, int containerWidth) throws Exception {
         Object parent = containingRow.get(container);
         if (parent == null || containerWidth <= 0) return null;
         List<?> children = (List<?>) getChildren.invoke(parent);
@@ -742,14 +1144,9 @@ final class SystemUiGroupText {
         View hybridLast = (View) getSingleLine.invoke(children.get(slots - 1));
         if (!expanded && !changing && container.isShown() && hybrid0.getHeight() > 0
                 && hybridLast != null && hybridLast.getHeight() > 0) {
-            int[] locContainer = new int[2];
-            int[] locFirst = new int[2];
-            int[] locLast = new int[2];
-            container.getLocationOnScreen(locContainer);
-            hybrid0.getLocationOnScreen(locFirst);
-            hybridLast.getLocationOnScreen(locLast);
-            int measuredTop = locFirst[1] - locContainer[1];
-            int measuredBottom = (locLast[1] + hybridLast.getHeight()) - locContainer[1];
+            int measuredTop = localTopInAncestor(hybrid0, container);
+            int lastTop = localTopInAncestor(hybridLast, container);
+            int measuredBottom = lastTop >= 0 ? lastTop + hybridLast.getHeight() : -1;
             if (measuredTop > 0 && measuredBottom > measuredTop) {
                 state.collapsedTop = measuredTop;
                 state.collapsedBottom = measuredBottom;
@@ -757,7 +1154,8 @@ final class SystemUiGroupText {
             }
         }
         if (state.cachedSlots == slots && state.collapsedBottom > state.collapsedTop) {
-            return new int[]{left, state.collapsedTop, right, state.collapsedBottom};
+            state.bounds.set(left, state.collapsedTop, right, state.collapsedBottom);
+            return state.bounds;
         }
 
         int gap = childPaddingField.getInt(container);
@@ -775,7 +1173,8 @@ final class SystemUiGroupText {
                 ? Math.round(13f * container.getResources().getDisplayMetrics().density)
                 : (Integer) getCollapsedHeaderMargin.invoke(container)
                         + headerTranslationField.getInt(container);
-        return new int[]{left, top, right, top + height};
+        state.bounds.set(left, top, right, top + height);
+        return state.bounds;
     }
 
     private TextView activeInnerText(View hybrid) throws Exception {
@@ -919,9 +1318,14 @@ final class SystemUiGroupText {
 
     private static final class OverlayState {
         final NebulaSummaryView view;
+        final Rect bounds = new Rect();
+        final int[] location = new int[2];
+        final ArrayList<StatusBarNotification> versionChildren = new ArrayList<>();
+        String versionFingerprint;
         Mode mode = Mode.NONE;
         String rawText;
         boolean darkSurface;
+        boolean xiaoAiStyle = GlowStyle.isXiaoAi();
         float fontScale;
         float textSizePx;
         int nightMask = -1;
@@ -929,6 +1333,13 @@ final class SystemUiGroupText {
         int collapsedBottom;
         int cachedSlots;
         int activeSlots;
+        int textVersion;
+        int measuredTextVersion;
+        int measuredWidth;
+        int measuredTextHeight;
+        int adaptiveHeight;
+        int reportedAdaptiveHeight;
+        boolean heightNotifyScheduled;
         boolean animating;
         boolean wasVisibleOnScreen;
         long lastHiddenUptimeMs;
@@ -945,7 +1356,8 @@ final class SystemUiGroupText {
         void onWashProgress(float progress);
     }
 
-    private static final class NebulaSummaryView extends TextView {
+    private final class NebulaSummaryView extends TextView implements ViewTreeObserver.OnPreDrawListener {
+        private final OverlayState state = new OverlayState(this);
         private static final long THINKING_DEBOUNCE_MS = 140L;
         private static final long THINKING_FADE_IN_MS = 200L;
         private static final long THINKING_CYCLE_MS = 1450L;
@@ -967,9 +1379,6 @@ final class SystemUiGroupText {
         private final Matrix shaderMatrix = new Matrix();
 
         private Shader scanWaveShader;
-        private float cachedWaveWidth;
-        private float cachedWaveHeight;
-        private boolean cachedWaveDark;
 
         private LinearGradient revealMaskShader;
         private float cachedMaskFeather;
@@ -978,9 +1387,11 @@ final class SystemUiGroupText {
         private LinearGradient textTrailShader;
         private float cachedTrailWidth;
         private boolean cachedTrailDark;
+        private boolean cachedTrailXiaoAi;
 
         private boolean thinkingMode;
         private boolean darkSurface = true;
+        private boolean xiaoAiStyle = GlowStyle.isXiaoAi();
         private float dragLuminescence = 1f;
 
         // Thinking scanlight state
@@ -1025,6 +1436,16 @@ final class SystemUiGroupText {
             }
         }
 
+        void setGlowStyle(boolean xiaoAi) {
+            if (xiaoAiStyle != xiaoAi) {
+                xiaoAiStyle = xiaoAi;
+                badgeSpan.setXiaoAiStyle(xiaoAi);
+                scanWaveShader = null;
+                textTrailShader = null;
+                invalidate();
+            }
+        }
+
         void setDragLuminescence(float value) {
             float clamped = Math.max(0f, Math.min(1f, value));
             if (Math.abs(dragLuminescence - clamped) > 0.005f) {
@@ -1046,14 +1467,41 @@ final class SystemUiGroupText {
         }
 
         CharSequence buildSummarySpannable(String summaryText) {
+            String[] lines = summaryText.split("\n");
             SpannableStringBuilder ssb = new SpannableStringBuilder();
+            if (lines.length <= 1) {
+                badgeSpan.setShowHairline(true);
+                ssb.append('\uFFFC');
+                ssb.append(summaryText);
+                ssb.setSpan(badgeSpan, 0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                return ssb;
+            }
+            badgeSpan.setShowHairline(false);
             ssb.append('\uFFFC');
-            ssb.append(summaryText);
             ssb.setSpan(badgeSpan, 0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            int bulletIndent = Math.round(11f * density);
+            int bulletIndex = 0;
+            for (String rawLine : lines) {
+                String line = rawLine.trim();
+                if (line.isEmpty()) continue;
+                int dotColor = NebulaSummaryVisuals.bulletDotColor(darkSurface, xiaoAiStyle, bulletIndex++);
+                ssb.append('\n');
+                int lineStart = ssb.length();
+                ssb.append("• ");
+                ssb.setSpan(new ForegroundColorSpan(dotColor), lineStart, lineStart + 1,
+                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                ssb.append(line);
+                ssb.setSpan(new LeadingMarginSpan.Standard(0, bulletIndent), lineStart, ssb.length(),
+                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            }
             return ssb;
         }
 
         void enterThinkingMode(boolean dark, boolean visible) {
+            if (thinkingMode && darkSurface == dark && thinkingDesiredVisible == visible) {
+                setThinkingVisible(visible);
+                return;
+            }
             setDarkSurface(dark);
             cancelWashAnimator();
             cancelGlintAnimator();
@@ -1113,6 +1561,7 @@ final class SystemUiGroupText {
         }
 
         void enterSteadySummaryMode() {
+            if (!thinkingMode && !washAnimating && washProgress == 1f) return;
             thinkingMode = false;
             stopThinkingAnimators();
             cancelWashAnimator();
@@ -1273,22 +1722,31 @@ final class SystemUiGroupText {
         }
 
         @Override
+        protected void onAttachedToWindow() {
+            super.onAttachedToWindow();
+            getViewTreeObserver().addOnPreDrawListener(this);
+        }
+
+        @Override
+        public boolean onPreDraw() {
+            if (getParent() instanceof ViewGroup container) beforeOverlayDraw(container, state);
+            return true;
+        }
+
+        @Override
         protected void onDetachedFromWindow() {
+            state.heightNotifyScheduled = false;
+            getViewTreeObserver().removeOnPreDrawListener(this);
+            cancelExpandAnimation(state);
             cancelTransientVisuals();
             super.onDetachedFromWindow();
         }
 
-        private void ensureWaveShader(float bandWidth, float height) {
-            if (scanWaveShader != null && cachedWaveDark == darkSurface
-                    && Math.abs(cachedWaveWidth - bandWidth) < 1f
-                    && Math.abs(cachedWaveHeight - height) < 1f) {
-                return;
+        private void ensureWaveShader() {
+            if (scanWaveShader == null) {
+                scanWaveShader = NebulaSummaryVisuals.createFeatheredWaveShader(
+                        1, 0, 1, darkSurface, xiaoAiStyle);
             }
-            cachedWaveWidth = bandWidth;
-            cachedWaveHeight = height;
-            cachedWaveDark = darkSurface;
-            scanWaveShader = NebulaSummaryVisuals.createFeatheredWaveShader(
-                    bandWidth, 0f, height, darkSurface);
         }
 
         private void ensureMaskShader(float feather, boolean rtl) {
@@ -1311,17 +1769,14 @@ final class SystemUiGroupText {
 
         private void ensureTextTrailShader(float trailW) {
             if (textTrailShader != null && cachedTrailDark == darkSurface
+                    && cachedTrailXiaoAi == xiaoAiStyle
                     && Math.abs(cachedTrailWidth - trailW) < 1f) {
                 return;
             }
             cachedTrailWidth = trailW;
             cachedTrailDark = darkSurface;
-            int[] colors = darkSurface
-                    ? new int[]{0x005CE1FF, 0x785CE1FF, 0xD8EDF6FF, 0x80A17DFF, 0x00A17DFF}
-                    : new int[]{0x000E99E6, 0x660E99E6, 0xC8256CEB, 0x706F4FF0, 0x006F4FF0};
-            textTrailShader = new LinearGradient(
-                    0f, 0f, Math.max(1f, trailW), 0f,
-                    colors, new float[]{0f, 0.24f, 0.52f, 0.78f, 1f}, Shader.TileMode.CLAMP);
+            cachedTrailXiaoAi = xiaoAiStyle;
+            textTrailShader = NebulaSummaryVisuals.createTextTrailGradient(trailW, darkSurface, xiaoAiStyle);
         }
 
         @Override
@@ -1335,7 +1790,7 @@ final class SystemUiGroupText {
             if (thinkingMode) {
                 if (thinkingFadeAlpha > 0.01f) {
                     float bandW = Math.max(76f * density, w * 0.46f);
-                    ensureWaveShader(bandW, h);
+                    ensureWaveShader();
                     float travelStart = rtl ? (w + bandW * 0.40f) : (-bandW * 0.40f);
                     float travelEnd = rtl ? (-bandW * 0.40f) : (w + bandW * 0.40f);
                     float centerX = travelStart + (travelEnd - travelStart) * thinkingPhase;
@@ -1350,7 +1805,7 @@ final class SystemUiGroupText {
             }
 
             badgeSpan.syncAnimationState(
-                    darkSurface, dragLuminescence, sparkleBloom,
+                    darkSurface, xiaoAiStyle, dragLuminescence, sparkleBloom,
                     badgeGlintProgress, badgeGlintIntensity);
 
             if (!washAnimating) {
@@ -1410,7 +1865,7 @@ final class SystemUiGroupText {
             // 3. Soft vertically-feathered 14-degree tilted Nebula wavefront ribbon
             if (waveEnvelope > 0.01f) {
                 float bandW = Math.max(62f * density, contentSpan * 0.38f);
-                ensureWaveShader(bandW, h);
+                ensureWaveShader();
                 NebulaSummaryVisuals.drawTiltedNebulaWave(
                         canvas, 0f, 0f, w, h, waveX, bandW,
                         waveEnvelope * (darkSurface ? 1.0f : 0.94f),
@@ -1433,6 +1888,8 @@ final class SystemUiGroupText {
         private final Matrix shaderMatrix = new Matrix();
 
         private boolean darkSurface = true;
+        private boolean xiaoAiStyle = GlowStyle.isXiaoAi();
+        private boolean showHairline = true;
         private float alphaScale = 1f;
         private float sparkleBloom;
         private float glintProgress = -1f;
@@ -1440,6 +1897,7 @@ final class SystemUiGroupText {
 
         private float cachedTextSize = Float.NaN;
         private boolean cachedDark;
+        private boolean cachedXiaoAi;
         private float cachedPrimaryR;
         private float cachedDualW;
         private float cachedLabelW;
@@ -1462,15 +1920,28 @@ final class SystemUiGroupText {
             hairlinePaint.setStrokeWidth(Math.max(1f, 0.80f * density));
         }
 
-        void syncAnimationState(boolean dark, float alpha, float bloom, float glintPos, float glintInt) {
-            if (darkSurface != dark) {
+        void setXiaoAiStyle(boolean xiaoAi) {
+            if (xiaoAiStyle != xiaoAi) {
+                xiaoAiStyle = xiaoAi;
+                invalidateShaders();
+            }
+        }
+
+        void syncAnimationState(boolean dark, boolean xiaoAi, float alpha, float bloom,
+                float glintPos, float glintInt) {
+            if (darkSurface != dark || xiaoAiStyle != xiaoAi) {
                 darkSurface = dark;
+                xiaoAiStyle = xiaoAi;
                 invalidateShaders();
             }
             alphaScale = alpha;
             sparkleBloom = bloom;
             glintProgress = glintPos;
             glintIntensity = glintInt;
+        }
+
+        void setShowHairline(boolean show) {
+            showHairline = show;
         }
 
         void invalidateShaders() {
@@ -1482,11 +1953,13 @@ final class SystemUiGroupText {
 
         private void ensureMetrics(Paint hostPaint) {
             float ts = hostPaint.getTextSize();
-            if (Math.abs(ts - cachedTextSize) < 0.25f && cachedDark == darkSurface && labelShader != null) {
+            if (Math.abs(ts - cachedTextSize) < 0.25f && cachedDark == darkSurface
+                    && cachedXiaoAi == xiaoAiStyle && labelShader != null) {
                 return;
             }
             cachedTextSize = ts;
             cachedDark = darkSurface;
+            cachedXiaoAi = xiaoAiStyle;
             cachedPrimaryR = Math.max(4.4f * density, ts * 0.355f);
             cachedDualW = NebulaSummaryVisuals.dualSparkleWidth(cachedPrimaryR);
 
@@ -1496,11 +1969,11 @@ final class SystemUiGroupText {
             cachedLabelW = labelPaint.measureText(NebulaSummaryVisuals.LABEL);
 
             sparkleShader = NebulaSummaryVisuals.createDiagonalSparkleGradient(
-                    0f, -cachedPrimaryR, cachedDualW, cachedPrimaryR, darkSurface);
+                    0f, -cachedPrimaryR, cachedDualW, cachedPrimaryR, darkSurface, xiaoAiStyle);
             labelShader = NebulaSummaryVisuals.createHorizontalBadgeGradient(
-                    0f, cachedLabelW, darkSurface);
+                    0f, cachedLabelW, darkSurface, xiaoAiStyle);
             glintShader = NebulaSummaryVisuals.createGlintSheenGradient(
-                    Math.max(24f * density, cachedLabelW * 0.65f), darkSurface);
+                    Math.max(24f * density, cachedLabelW * 0.65f), darkSurface, xiaoAiStyle);
             hairlineShader = null;
         }
 
@@ -1508,6 +1981,9 @@ final class SystemUiGroupText {
         public int getSize(Paint paint, CharSequence text, int start, int end, Paint.FontMetricsInt fm) {
             ensureMetrics(paint);
             float gapAfterSparkle = 3.0f * density;
+            if (!showHairline) {
+                return Math.round(cachedDualW + gapAfterSparkle + cachedLabelW);
+            }
             float gapBeforeHairline = 4.8f * density;
             float hairlineW = Math.max(1f, 0.80f * density);
             float gapAfterHairline = 5.0f * density;
@@ -1521,22 +1997,20 @@ final class SystemUiGroupText {
             ensureMetrics(paint);
             if (alphaScale <= 0.01f) return;
 
-            Paint.FontMetrics hostFm = paint.getFontMetrics();
-            float capH = -hostFm.ascent * 0.72f;
+            float capH = -paint.ascent() * 0.72f;
             float opticalMidY = y - capH * 0.5f;
 
-            // 1. Self-drawn Nebula Aurora dual 4-point sparkles
+            // 1. Self-drawn dual 4-point sparkles
             shaderMatrix.reset();
             shaderMatrix.setTranslate(x, opticalMidY);
             sparkleShader.setLocalMatrix(shaderMatrix);
             NebulaSummaryVisuals.drawDualSparkle(
-                    canvas, x, opticalMidY, cachedPrimaryR, darkSurface,
+                    canvas, x, opticalMidY, cachedPrimaryR, darkSurface, xiaoAiStyle,
                     alphaScale, sparkleBloom, sparkleShader, fillPaint, sparklePath);
 
-            // 2. Frameless Nebula gradient SemiBold "AI 摘要"
+            // 2. Frameless gradient SemiBold "AI 摘要"
             float labelX = x + cachedDualW + 3.0f * density;
-            Paint.FontMetrics lfm = labelPaint.getFontMetrics();
-            float labelBaseline = opticalMidY - (lfm.ascent + lfm.descent) * 0.5f;
+            float labelBaseline = opticalMidY - (labelPaint.ascent() + labelPaint.descent()) * 0.5f;
 
             shaderMatrix.reset();
             shaderMatrix.setTranslate(labelX, 0f);
@@ -1561,13 +2035,15 @@ final class SystemUiGroupText {
                 glintLabelPaint.setShader(null);
             }
 
-            // 4. Feather-thin 0.8dp vertical fading Nebula hairline separator
+            // 4. Feather-thin 0.8dp vertical fading hairline separator (single-line inline mode)
+            if (!showHairline) return;
             float hairlineW = Math.max(1f, 0.80f * density);
             float hx = labelX + cachedLabelW + 4.8f * density + hairlineW * 0.5f;
             float halfH = capH * 0.50f;
             if (hairlineShader == null || Math.abs(cachedHairlineHalfH - halfH) > 0.5f) {
                 cachedHairlineHalfH = halfH;
-                hairlineShader = NebulaSummaryVisuals.createHairlineGradient(-halfH, halfH, darkSurface);
+                hairlineShader = NebulaSummaryVisuals.createHairlineGradient(
+                        -halfH, halfH, darkSurface, xiaoAiStyle);
             }
             shaderMatrix.reset();
             shaderMatrix.setTranslate(0f, opticalMidY);

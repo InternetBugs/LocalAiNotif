@@ -6,8 +6,6 @@ import android.os.StatFs;
 import java.io.File;
 import java.io.UnsupportedEncodingException;
 import java.net.URLEncoder;
-import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 
@@ -62,53 +60,38 @@ final class ModelCatalog {
         }
     }
 
-    static final List<ModelSpec> PRESETS = Collections.unmodifiableList(Arrays.asList(
+    static final List<ModelSpec> PRESETS = List.of(
             new ModelSpec(
-                    "qwen3-1.7b",
-                    "Qwen3-1.7B",
+                    "qwen3.5-0.8b",
+                    "Qwen3.5-0.8B",
                     "推荐",
-                    "速度与准确度均衡，适合日常通知分类与多条组摘要。",
-                    "约 1.1 GB，推理峰值内存约 1.6 GB，日常综合表现最稳",
-                    "默认推荐的端侧模型（MNN INT4 量化）。在中文理解、重要通知判定与折叠组摘要的自然度之间取得良好平衡，单次推理耗时与内存占用可控，适合小米 15 等设备长期日常开启。",
+                    "用于中文通知分类和摘要。兼容的高通骁龙处理器可使用 Hexagon NPU。",
+                    "约 550 MB，MNN 4 位量化",
+                    "当前支持骁龙 8 至尊版（SM8750）的 Hexagon NPU，可与 CPU 协同处理通知。NPU 不可用时使用 CPU 推理。",
                     "MNN INT4",
-                    "约 1.6 GB",
-                    "均衡（单次约 3–10 秒）",
-                    "qwen3-1.7b-mnn",
-                    "MNN/Qwen3-1.7B-MNN",
-                    "taobao-mnn/Qwen3-1.7B-MNN",
-                    1_135_000_000L
+                    "CPU 924 MiB\nNPU 混合 299 MiB",
+                    "CPU 0.36 秒\nNPU 混合 0.99 秒",
+                    "qwen3.5-0.8b-mnn",
+                    "MNN/Qwen3.5-0.8B-MNN",
+                    "taobao-mnn/Qwen3.5-0.8B-MNN",
+                    547_600_000L
             ),
             new ModelSpec(
-                    "qwen3-0.6b",
-                    "Qwen3-0.6B",
+                    "qwen3.5-2b",
+                    "Qwen3.5-2B",
                     null,
-                    "体积小、启动快、内存占用低，适合偏重续航与响应速度。",
-                    "约 420 MB，推理峰值内存约 0.7 GB，冷启动与出字最快",
-                    "极致轻量档位（MNN INT4 量化）。下载体积约 420 MB，加载迅速、几乎不影响大型游戏或多任务后台驻留；面对复杂长对话群聊时，摘要细节与分类精细度略弱于 1.7B 与 4B。",
+                    "用于中文通知分类和摘要。兼容的高通骁龙处理器可使用 Hexagon NPU。",
+                    "约 1.27 GB，MNN 4 位量化",
+                    "在骁龙 8 至尊版（SM8750）上，Hexagon NPU 处理投影和门控归一化，CPU 执行其余运算。NPU 不可用时自动使用 CPU。",
                     "MNN INT4",
-                    "约 0.7 GB",
-                    "最快（低内存轻量）",
-                    "qwen3-0.6b-mnn",
-                    "MNN/Qwen3-0.6B-MNN",
-                    "taobao-mnn/Qwen3-0.6B-MNN",
-                    442_000_000L
-            ),
-            new ModelSpec(
-                    "qwen3-4b",
-                    "Qwen3-4B",
-                    null,
-                    "语义理解与摘要提炼更准确，适合 12GB 及以上大内存设备。",
-                    "约 2.3 GB，推理峰值内存约 3.8 GB，分类与概括质量最高",
-                    "高质量进阶档位（MNN INT4 量化）。对长文本通知、多条群聊上下文的要点归纳以及重要通知边界的判定更稳定，但下载体积与推理内存开销较大，单次推理耗时也相对更长。",
-                    "MNN INT4",
-                    "约 3.8 GB",
-                    "较慢（高准确度优先）",
-                    "qwen3-4b-mnn",
-                    "MNN/Qwen3-4B-MNN",
-                    "taobao-mnn/Qwen3-4B-MNN",
-                    2_470_000_000L
+                    "CPU 1,725 MiB\nNPU 混合 1,343 MiB",
+                    "CPU 0.73 秒\nNPU 混合 4.99 秒",
+                    "qwen3.5-2b-mnn",
+                    "MNN/Qwen3.5-2B-MNN",
+                    "taobao-mnn/Qwen3.5-2B-MNN",
+                    1_271_728_585L
             )
-    ));
+    );
 
     private ModelCatalog() {}
 
@@ -192,6 +175,14 @@ final class ModelCatalog {
             sum += directorySizeBytes(child);
         }
         return sum;
+    }
+
+    record ActiveSize(String path, long bytes) {
+        static ActiveSize read(android.os.Bundle config) {
+            if (config == null || !config.getBoolean(Config.KEY_MODEL_READY)) return null;
+            String path = config.getString(Config.KEY_MODEL_PATH, Config.DEFAULT_MODEL_PATH);
+            return new ActiveSize(path, directorySizeBytes(new File(path)));
+        }
     }
 
     static boolean deleteRecursively(File file) {

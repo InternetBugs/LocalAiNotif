@@ -2,8 +2,6 @@ package com.localai.notif;
 
 import android.content.Context;
 import android.content.Intent;
-import android.graphics.Color;
-import android.graphics.drawable.Drawable;
 import android.os.SystemClock;
 import android.util.Log;
 import android.view.LayoutInflater;
@@ -35,7 +33,6 @@ final class SystemUiVolumeReduce {
     private static final String RINGER_LAYOUT = VOLUME + "MiuiRingerModeLayout";
     private static final long DND_EXIT_NOTICE_WINDOW_MS = 1_500L;
     private static final float MOON_DIM_ALPHA = 0.4f;
-    private static final int ACTIVE_ICON_COLOR = 0xFF277AF7;
 
     // MIUISystemUIPlugin.apk resources on HyperOS 4.0.3.
     private static final int RID_RINGER_LAYOUT_ROOT = 0x7f0a0330;
@@ -73,7 +70,7 @@ final class SystemUiVolumeReduce {
         Object moonHelper;
         Object timer;
         ImageView icon;
-        Drawable sparkle;
+        VolumeReduceIconDrawable sparkle;
         boolean expanded;
     }
 
@@ -438,7 +435,7 @@ final class SystemUiVolumeReduce {
             binding.moonHelper = ModuleMain.findField(layoutClass, "mDndHelper").get(layout);
             binding.timer = timer;
             binding.icon = (ImageView) ModuleMain.findField(helperClass, "mIcon").get(helper);
-            binding.sparkle = ReduceInterruptions.createVolumeDrawable(context);
+            binding.sparkle = new VolumeReduceIconDrawable(context, reduceActive);
 
             View button = (View) ModuleMain.findField(helperClass, "mBlurView").get(helper);
             View label = (View) ModuleMain.findField(helperClass, "mStandardView").get(helper);
@@ -502,7 +499,7 @@ final class SystemUiVolumeReduce {
         invoke(binding.helper, "setRingerMode", reduceActive);
         invoke(binding.helper, "updateState");
         if (binding.icon.getDrawable() != binding.sparkle) binding.icon.setImageDrawable(binding.sparkle);
-        binding.sparkle.setTint(reduceActive ? ACTIVE_ICON_COLOR : Color.WHITE);
+        binding.sparkle.setActive(reduceActive, binding.icon.isAttachedToWindow() && binding.icon.isShown());
         binding.moonColumn.setAlpha(reduceActive ? MOON_DIM_ALPHA : 1f);
         binding.moonSeekBar.setEnabled(!reduceActive);
         invoke(binding.moonHelper, "updateState");

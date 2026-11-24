@@ -1,0 +1,391 @@
+name: Manual Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v1.2.1; leave blank to use v<versionName> from AndroidManifest.xml)"
+        required: false
+        type: string
+        default: ""
+      release_title:
+        description: "Release title (leave blank for 'LocalAiNotif <tag>')"
+        required: false
+        type: string
+        default: ""
+      release_notes:
+        description: "Release notes (leave blank to auto-generate from git history)"
+        required: false
+        type: string
+        default: ""
+      prerelease:
+        description: "Mark as pre-release (in-app updater ignores pre-releases)"
+        required: false
+        type: boolean
+        default: false
+      draft:
+        description: "Create as draft release (review before publishing)"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: manual-release
+  cancel-in-progress: false
+
+env:
+  MNN_COMMIT: b0239771b07b317a258fbc384683bbd540741406
+  ANDROID_PLATFORM: android-36
+  BUILD_TOOLS_VERSION: 35.0.0
+  NDK_VERSION: 28.2.13676358
+  EXPECTED_CERT_SHA256: 89034f48bdf131455ede17c3608729367295d3533a73fa23181585143081cecc
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve and validate release metadata
+        id: meta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_TITLE: ${{ inputs.release_title }}
+          INPUT_PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/.*android:versionName="\([^"]*\)".*/\1/p' AndroidManifest.xml)"
+          VERSION_CODE="$(sed -n 's/.*android:versionCode="\([^"]*\)".*/\1/p' AndroidManifest.xml)"
+          if [ -z "$VERSION" ]; then
+            echo "::error::Failed to parse android:versionName from AndroidManifest.xml"
+            exit 1
+          fi
+
+          TAG="${INPUT_TAG:-v${VERSION}}"
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid release tag '$TAG'. Expected format like v1.2.1"
+            exit 1
+          fi
+
+          if [ "$INPUT_PRERELEASE" != "true" ] && [ "$TAG" != "v${VERSION}" ]; then
+            echo "::error::Stable release tag '$TAG' must match AndroidManifest.xml versionName 'v${VERSION}' (required by ReleaseUpdate.java)."
+            exit 1
+          fi
+
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "::error::GitHub Release '$TAG' already exists. Bump AndroidManifest.xml versionName/versionCode or delete the existing release first."
+            exit 1
+          fi
+
+          TITLE="${INPUT_TITLE:-LocalAiNotif ${TAG}}"
+          APK_NAME="LocalAiNotif-v${VERSION}.apk"
+
+          {
+            echo "version=${VERSION}"
+            echo "version_code=${VERSION_CODE}"
+            echo "tag=${TAG}"
+            echo "title=${TITLE}"
+            echo "apk_name=${APK_NAME}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Resolved release: tag=${TAG}, version=${VERSION} (${VERSION_CODE}), apk=${APK_NAME}"
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Ensure Android SDK platform, build-tools, and NDK
+        id: sdk
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          SDKMANAGER=""
+          for candidate in \
+            "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" \
+            "$SDK_ROOT/cmdline-tools/bin/sdkmanager" \
+            "$(command -v sdkmanager || true)"; do
+            if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+              SDKMANAGER="$candidate"
+              break
+            fi
+          done
+          if [ -z "$SDKMANAGER" ]; then
+            echo "::error::sdkmanager not found under $SDK_ROOT"
+            exit 1
+          fi
+
+          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null || true
+
+          NEEDED=()
+          [ -f "$SDK_ROOT/platforms/${ANDROID_PLATFORM}/android.jar" ] || NEEDED+=("platforms;${ANDROID_PLATFORM}")
+          [ -x "$SDK_ROOT/build-tools/${BUILD_TOOLS_VERSION}/aapt2" ] || NEEDED+=("build-tools;${BUILD_TOOLS_VERSION}")
+          [ -d "$SDK_ROOT/ndk/${NDK_VERSION}" ] || NEEDED+=("ndk;${NDK_VERSION}")
+
+          if [ "${#NEEDED[@]}" -gt 0 ]; then
+            echo "Installing Android SDK packages: ${NEEDED[*]}"
+            "$SDKMANAGER" --sdk_root="$SDK_ROOT" "${NEEDED[@]}"
+          else
+            echo "All required Android SDK packages are already installed."
+          fi
+
+          {
+            echo "sdk_root=${SDK_ROOT}"
+            echo "ndk_dir=${SDK_ROOT}/ndk/${NDK_VERSION}"
+            echo "build_tools=${SDK_ROOT}/build-tools/${BUILD_TOOLS_VERSION}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout MNN at pinned commit
+        run: |
+          set -euo pipefail
+          MNN_DIR="${RUNNER_TEMP}/MNN"
+          rm -rf "$MNN_DIR"
+          mkdir -p "$MNN_DIR"
+          git -C "$MNN_DIR" init -q
+          git -C "$MNN_DIR" fetch --depth 1 https://github.com/alibaba/MNN.git "${MNN_COMMIT}"
+          git -C "$MNN_DIR" checkout -q FETCH_HEAD
+
+      - name: Cache built libMNN.so
+        id: mnn_cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/MNN/project/android/build_local/libMNN.so
+          key: mnn-${{ env.MNN_COMMIT }}-${{ env.NDK_VERSION }}-htp-v79-${{ hashFiles('jni/MnnHexagon.cmake', 'jni/HexagonProjectionFactory.cpp') }}
+
+      - name: Build libMNN.so (arm64-v8a) on cache miss
+        if: steps.mnn_cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          MNN_DIR="${RUNNER_TEMP}/MNN"
+          BUILD_DIR="$MNN_DIR/project/android/build_local"
+          mkdir -p "$BUILD_DIR"
+          cmake -S "$MNN_DIR" -B "$BUILD_DIR" \
+            -DCMAKE_PROJECT_INCLUDE="$GITHUB_WORKSPACE/jni/MnnHexagon.cmake" \
+            -DCMAKE_TOOLCHAIN_FILE="${{ steps.sdk.outputs.ndk_dir }}/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_NATIVE_API_LEVEL=android-24 \
+            -DANDROID_STL=c++_shared \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-z,max-page-size=16384" \
+            -DMNN_BUILD_FOR_ANDROID_COMMAND=ON \
+            -DMNN_SEP_BUILD=OFF \
+            -DMNN_BUILD_SHARED_LIBS=ON \
+            -DMNN_USE_LOGCAT=ON \
+            -DMNN_ARM82=ON \
+            -DMNN_LOW_MEMORY=ON \
+            -DMNN_CPU_WEIGHT_DEQUANT_GEMM=ON \
+            -DMNN_SUPPORT_TRANSFORMER_FUSE=ON \
+            -DMNN_BUILD_LLM=ON \
+            -DMNN_HEXAGON=ON \
+            -DMNN_HEXAGON_APP_POWER_HOLD=ON \
+            -DMNN_OPENMP=OFF \
+            -DMNN_USE_THREAD_POOL=ON \
+            -DMNN_KLEIDIAI=OFF \
+            -DMNN_KLEIDIAI_DEFAULT_ON=OFF \
+            -DMNN_BUILD_DEMO=OFF \
+            -DMNN_LLM_BUILD_DEMO=OFF \
+            -DMNN_BUILD_TEST=OFF \
+            -DMNN_BUILD_BENCHMARK=OFF \
+            -DMNN_BUILD_CONVERTER=OFF
+          cmake --build "$BUILD_DIR" --target MNN -j"$(nproc)"
+          ls -lh "$BUILD_DIR/libMNN.so"
+
+      - name: Prepare signing config from GitHub Secrets
+        id: signing
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+          SIGNING_LINEAGE_BASE64: ${{ secrets.SIGNING_LINEAGE_BASE64 }}
+          LEGACY_KEYSTORE_BASE64: ${{ secrets.LEGACY_KEYSTORE_BASE64 }}
+          LEGACY_KEY_ALIAS: ${{ secrets.LEGACY_KEY_ALIAS }}
+          LEGACY_KEY_PASSWORD: ${{ secrets.LEGACY_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          python3 - <<'EOF'
+          import base64, json, os, sys
+
+          required = [
+              "RELEASE_KEYSTORE_BASE64",
+              "RELEASE_STORE_PASSWORD",
+              "RELEASE_KEY_ALIAS",
+              "RELEASE_KEY_PASSWORD",
+          ]
+          missing = [k for k in required if not os.environ.get(k)]
+          if missing:
+              sys.exit(f"ERROR: Missing required GitHub Actions secrets: {', '.join(missing)}")
+
+          sdir = os.path.join(os.environ["RUNNER_TEMP"], "signing")
+          os.makedirs(sdir, mode=0o700, exist_ok=True)
+
+          def write_b64(env_key, filename):
+              raw = base64.b64decode("".join(os.environ[env_key].split()))
+              out = os.path.join(sdir, filename)
+              with open(out, "wb") as f:
+                  f.write(raw)
+              os.chmod(out, 0o600)
+
+          write_b64("RELEASE_KEYSTORE_BASE64", "localai-notif-release.p12")
+          cfg = {
+              "keystore": "localai-notif-release.p12",
+              "store_password": os.environ["RELEASE_STORE_PASSWORD"],
+              "key_alias": os.environ["RELEASE_KEY_ALIAS"],
+              "key_password": os.environ["RELEASE_KEY_PASSWORD"],
+          }
+
+          has_rotation = all(
+              os.environ.get(k)
+              for k in (
+                  "SIGNING_LINEAGE_BASE64",
+                  "LEGACY_KEYSTORE_BASE64",
+                  "LEGACY_KEY_ALIAS",
+                  "LEGACY_KEY_PASSWORD",
+              )
+          )
+          if has_rotation:
+              write_b64("SIGNING_LINEAGE_BASE64", "localai-notif-v3.lineage")
+              write_b64("LEGACY_KEYSTORE_BASE64", "localai-debug-legacy.keystore")
+              cfg["lineage"] = "localai-notif-v3.lineage"
+              cfg["legacy_keystore"] = "localai-debug-legacy.keystore"
+              cfg["legacy_alias"] = os.environ["LEGACY_KEY_ALIAS"]
+              cfg["legacy_password"] = os.environ["LEGACY_KEY_PASSWORD"]
+
+          cfg_path = os.path.join(sdir, "signing-backup.json")
+          with open(cfg_path, "w", encoding="utf-8") as f:
+              json.dump(cfg, f, indent=2)
+          os.chmod(cfg_path, 0o600)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"config_path={cfg_path}\n")
+              out.write(f"has_rotation={'true' if has_rotation else 'false'}\n")
+          print(f"Prepared signing config (v3 rotation enabled: {has_rotation})")
+          EOF
+
+      - name: Build and sign APK
+        env:
+          ANDROID_SDK_ROOT: ${{ steps.sdk.outputs.sdk_root }}
+          NDK_DIR: ${{ steps.sdk.outputs.ndk_dir }}
+          MNN_DIR: ${{ runner.temp }}/MNN
+          MNN_LIB: ${{ runner.temp }}/MNN/project/android/build_local/libMNN.so
+          SIGNING_CONFIG: ${{ steps.signing.outputs.config_path }}
+        run: |
+          set -euo pipefail
+          chmod +x build.sh
+          BUILD_TYPE=release bash build.sh
+          BUILD_TYPE=debug bash build.sh
+
+      - name: Scrub temporary signing files
+        if: always()
+        run: rm -rf "${RUNNER_TEMP}/signing"
+
+      - name: Verify APK signature, lineage, 16KB alignment, and checksums
+        run: |
+          set -euo pipefail
+          APK="dist/${{ steps.meta.outputs.apk_name }}"
+          BUILD_TOOLS="${{ steps.sdk.outputs.build_tools }}"
+          APKSIGNER_JAR="$BUILD_TOOLS/lib/apksigner.jar"
+
+          verify_apk() {
+          local APK="$1"
+          local badging
+          badging="$("$BUILD_TOOLS/aapt2" dump badging "$APK")"
+          if [[ "$APK" == *-debug.apk ]]; then
+            grep -qx 'application-debuggable' <<< "$badging"
+          elif grep -qx 'application-debuggable' <<< "$badging"; then
+            echo "::error::Release APK is debuggable"
+            exit 1
+          fi
+
+          echo "=== Verifying 16KB page alignment ==="
+          "$BUILD_TOOLS/zipalign" -c -P 16 4 "$APK"
+
+          echo "=== Verifying native libraries ==="
+          python3 - "$APK" <<'EOF'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              names = set(z.namelist())
+          for req in ("lib/arm64-v8a/liblocalai_llm.so", "lib/arm64-v8a/libMNN.so", "lib/arm64-v8a/libc++_shared.so",
+                      "lib/arm64-v8a/libMNN_htpops.so", "lib/arm64-v8a/libMNN_htpops_skelV79.so"):
+              if req not in names:
+                  sys.exit(f"ERROR: Missing required native library in APK: {req}")
+          print("All required arm64-v8a libraries present.")
+          EOF
+
+          echo "=== Verifying signature digest ==="
+          VERIFY_OUT="$(java -jar "$APKSIGNER_JAR" verify -v --print-certs "$APK")"
+          echo "$VERIFY_OUT"
+          if ! grep -qi "${EXPECTED_CERT_SHA256}" <<< "$VERIFY_OUT"; then
+            echo "::error::APK certificate SHA-256 does not match expected ${EXPECTED_CERT_SHA256}"
+            exit 1
+          fi
+
+          if [ "${{ steps.signing.outputs.has_rotation }}" = "true" ]; then
+            echo "=== Verifying embedded v3 signing lineage ==="
+            java -jar "$APKSIGNER_JAR" lineage --in "$APK" --print-certs
+          fi
+
+          }
+          verify_apk "$APK"
+          verify_apk "${APK%.apk}-debug.apk"
+          (cd dist && sha256sum "$(basename "$APK")" "$(basename "${APK%.apk}-debug.apk")" > SHA256SUMS.txt)
+          cat dist/SHA256SUMS.txt
+
+      - name: Upload signed APK workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LocalAiNotif-${{ steps.meta.outputs.tag }}
+          path: |
+            dist/*.apk
+            dist/SHA256SUMS.txt
+          retention-days: 30
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_NOTES: ${{ inputs.release_notes }}
+          RELEASE_TITLE: ${{ steps.meta.outputs.title }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.meta.outputs.tag }}"
+          TITLE="$RELEASE_TITLE"
+          APK="dist/${{ steps.meta.outputs.apk_name }}"
+
+          ARGS=(
+            release create "$TAG"
+            "$APK" "${APK%.apk}-debug.apk" "dist/SHA256SUMS.txt"
+            --repo "${{ github.repository }}"
+            --target "${{ github.sha }}"
+            --title "$TITLE"
+          )
+
+          NOTES_FILE="${RUNNER_TEMP}/release-notes.md"
+          {
+            echo '## 选择安装包'
+            echo
+            printf -- '- `%s`（Release）：适合日常使用，关闭应用调试。\n' "$(basename "$APK")"
+            printf -- '- `%s`（Debug）：适合排查问题，支持连接调试器和通过已授权的 ADB 使用 `run-as` 访问应用数据。\n' "$(basename "${APK%.apk}-debug.apk")"
+            echo
+            echo '两者功能、包名和正式签名相同，选择一个安装即可。'
+            echo
+            printf '%s\n' "$INPUT_NOTES"
+          } > "$NOTES_FILE"
+          ARGS+=(--notes-file "$NOTES_FILE")
+          if [ -z "$INPUT_NOTES" ]; then
+            ARGS+=(--generate-notes)
+          fi
+
+          if [ "${{ inputs.prerelease }}" = "true" ]; then
+            ARGS+=(--prerelease)
+          fi
+          if [ "${{ inputs.draft }}" = "true" ]; then
+            ARGS+=(--draft)
+          fi
+
+          gh "${ARGS[@]}"

@@ -19,14 +19,20 @@ import android.widget.LinearLayout;
 import android.widget.Toast;
 
 import java.io.File;
+import java.util.Arrays;
+import java.util.List;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
 
 public final class MainActivity extends Activity implements ModelDownloadManager.Listener {
     private static final Uri PROVIDER = Uri.parse("content://" + Config.AUTHORITY);
+    private static final Executor OPTION_IO = Executors.newSingleThreadExecutor();
     private static final String STATE_PRIORITY_ENABLED = "state_priority_enabled";
     private static final String STATE_GROUP_SUMMARY = "state_group_summary";
     private static final String STATE_REDUCE_ENABLED = "state_reduce_enabled";
     private static final String STATE_REDUCE_LOCK_ONLY = "state_reduce_lock_only";
     private static final String STATE_ALWAYS_LOAD_MODEL = "state_always_load_model";
+    private static final String STATE_GLOW_STYLE = "state_glow_style";
 
     private HyperSettingsUi.Palette mPalette;
     private HyperSettingsUi.SummaryPreviewView mSummaryPreview;
@@ -35,6 +41,10 @@ public final class MainActivity extends Activity implements ModelDownloadManager
     private HyperSettingsUi.SwitchRowParts mSummaryRow;
     private HyperSettingsUi.NavRowParts mSummaryAdvancedRow;
     private HyperSettingsUi.SwitchRowParts mPriorityRow;
+    private HyperSettingsUi.SwitchRowParts mPromotionRow;
+    private HyperSettingsUi.PromotionPreviewView mPromotionPreview;
+    private HyperSettingsUi.PageShell mPage;
+    private View mPromotionHeading;
     private HyperSettingsUi.SwitchRowParts mReduceRow;
     private HyperSettingsUi.SwitchRowParts mReduceLockOnlyRow;
     private HyperSettingsUi.SwitchRowParts mReduceIconsRow;
@@ -42,15 +52,19 @@ public final class MainActivity extends Activity implements ModelDownloadManager
     private HyperSettingsUi.NavRowParts mReduceTileRow;
     private HyperSettingsUi.NavRowParts mModelRow;
     private HyperSettingsUi.SwitchRowParts mAlwaysLoadRow;
+    private HyperSettingsUi.NavRowParts mGlowStyleRow;
     private ModelDownloadManager mDownloadManager;
 
     private boolean mSummaryBusy;
     private boolean mPriorityBusy;
     private boolean mReduceBusy;
     private boolean mAlwaysLoadBusy;
+    private boolean mGlowStyleBusy;
+    private String mGlowStyle = Config.DEFAULT_GLOW_STYLE;
     private boolean mEngineReceiverRegistered;
     private boolean mReduceReceiverRegistered;
     private Bundle mLastConfig;
+    private ModelCatalog.ActiveSize mActiveSize;
 
     private final BroadcastReceiver mEngineStateReceiver = new BroadcastReceiver() {
         @Override
@@ -84,6 +98,9 @@ public final class MainActivity extends Activity implements ModelDownloadManager
 
         mPalette = HyperSettingsUi.Palette.of(isDark);
         HyperSettingsUi.configureEdgeToEdge(this, mPalette);
+        boolean initialPromotion = savedInstanceState != null
+                ? savedInstanceState.getBoolean(Config.KEY_PROMOTION_FILTER, Config.DEFAULT_PROMOTION_FILTER)
+                : Config.DEFAULT_PROMOTION_FILTER;
         mDownloadManager = ModelDownloadManager.getInstance(this);
 
         boolean initialPriority = savedInstanceState != null
@@ -101,13 +118,47 @@ public final class MainActivity extends Activity implements ModelDownloadManager
         boolean initialAlwaysLoad = savedInstanceState != null
                 ? savedInstanceState.getBoolean(STATE_ALWAYS_LOAD_MODEL, Config.DEFAULT_ALWAYS_LOAD_MODEL)
                 : Config.DEFAULT_ALWAYS_LOAD_MODEL;
+        mGlowStyle = savedInstanceState != null
+                ? Config.sanitizeGlowStyle(savedInstanceState.getString(STATE_GLOW_STYLE, Config.DEFAULT_GLOW_STYLE))
+                : Config.DEFAULT_GLOW_STYLE;
+        GlowStyle.setCurrent(mGlowStyle);
 
         setContentView(buildContentView(
                 initialPriority, initialSummary, initialReduce, initialReduceLockOnly,
                 savedInstanceState != null && savedInstanceState.getBoolean(Config.KEY_REDUCE_FILTER_ICONS),
                 savedInstanceState != null && savedInstanceState.getBoolean(Config.KEY_REDUCE_NORMAL_SOUNDS),
-                initialAlwaysLoad));
+                initialAlwaysLoad, initialPromotion));
+        showRequestedSection(getIntent());
         refreshConfigFromProvider();
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        showRequestedSection(intent);
+    }
+
+    private void showRequestedSection(Intent intent) {
+        if (intent == null || !Config.ACTION_PROMOTION_SETTINGS.equals(intent.getAction())) {
+            return;
+        }
+        if (mPromotionHeading.getTop() > 0) {
+            mPage.scrollView.post(() -> mPage.scrollView.scrollTo(
+                    0, Math.max(0, mPromotionHeading.getTop() - dp(72))));
+            return;
+        }
+        mPromotionHeading.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+            @Override
+            public void onLayoutChange(
+                    View v, int left, int top, int right, int bottom,
+                    int oldLeft, int oldTop, int oldRight, int oldBottom) {
+                if (top <= 0) return;
+                v.removeOnLayoutChangeListener(this);
+                mPage.scrollView.post(() -> mPage.scrollView.scrollTo(
+                        0, Math.max(0, top - dp(72))));
+            }
+        });
     }
 
     @Override
@@ -154,6 +205,7 @@ public final class MainActivity extends Activity implements ModelDownloadManager
     @Override
     protected void onSaveInstanceState(Bundle outState) {
         super.onSaveInstanceState(outState);
+        outState.putBoolean(Config.KEY_PROMOTION_FILTER, mPromotionRow.toggle.isChecked());
         if (mPriorityRow != null) {
             outState.putBoolean(STATE_PRIORITY_ENABLED, mPriorityRow.toggle.isChecked());
         }
@@ -171,6 +223,7 @@ public final class MainActivity extends Activity implements ModelDownloadManager
         }
         outState.putBoolean(Config.KEY_REDUCE_FILTER_ICONS, mReduceIconsRow.toggle.isChecked());
         outState.putBoolean(Config.KEY_REDUCE_NORMAL_SOUNDS, mReduceSoundsRow.toggle.isChecked());
+        outState.putString(STATE_GLOW_STYLE, mGlowStyle);
     }
 
     @Override
@@ -189,11 +242,12 @@ public final class MainActivity extends Activity implements ModelDownloadManager
             boolean initialReduceLockOnly,
             boolean initialReduceFilterIcons,
             boolean initialReduceSounds,
-            boolean initialAlwaysLoad) {
-        boolean fromSystemSettings = getIntent() != null
-                && getIntent().getBooleanExtra(Config.EXTRA_FROM_SYSTEM_SETTINGS, false);
+            boolean initialAlwaysLoad, boolean initialPromotionFilter) {
+        boolean showBackButton = getIntent().getBooleanExtra(Config.EXTRA_FROM_SYSTEM_SETTINGS, false)
+                || Config.ACTION_PROMOTION_SETTINGS.equals(getIntent().getAction());
         HyperSettingsUi.PageShell shell = HyperSettingsUi.buildPageShell(
-                this, mPalette, resolveAppTitle(), fromSystemSettings);
+                this, mPalette, resolveAppTitle(), showBackButton);
+        mPage = shell;
         LinearLayout content = shell.content;
 
         // 1. Section: AI 摘要 (preview + toggle + subpage unified inside one 18dp squircle card)
@@ -274,6 +328,10 @@ public final class MainActivity extends Activity implements ModelDownloadManager
         priorityCard.addView(mPriorityRow.row);
         content.addView(priorityCard);
 
+        mPromotionHeading = HyperSettingsUi.createSmallTitle(this, mPalette, "噪音过滤", 20);
+        content.addView(mPromotionHeading);
+        content.addView(buildPromotionCard(initialPromotionFilter));
+
         // 3. Section: 减少干扰 (preview + master toggle + lock-screen-only + QS tile shortcut)
         content.addView(HyperSettingsUi.createSmallTitle(this, mPalette, "减少干扰", 20));
 
@@ -318,7 +376,7 @@ public final class MainActivity extends Activity implements ModelDownloadManager
             boolean target = !mReduceLockOnlyRow.toggle.isChecked();
             view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
             mReduceLockOnlyRow.toggle.setChecked(target, true);
-            saveReduceOption(Config.KEY_REDUCE_LOCK_SCREEN_ONLY, target, mReduceLockOnlyRow);
+            saveSwitchOption(Config.KEY_REDUCE_LOCK_SCREEN_ONLY, target, mReduceLockOnlyRow);
         });
         reduceCard.addView(mReduceLockOnlyRow.row);
         reduceCard.addView(HyperSettingsUi.createInsetDivider(this, mPalette));
@@ -330,7 +388,7 @@ public final class MainActivity extends Activity implements ModelDownloadManager
             boolean target = !mReduceIconsRow.toggle.isChecked();
             view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
             mReduceIconsRow.toggle.setChecked(target, true);
-            saveReduceOption(Config.KEY_REDUCE_FILTER_ICONS, target, mReduceIconsRow);
+            saveSwitchOption(Config.KEY_REDUCE_FILTER_ICONS, target, mReduceIconsRow);
         });
         reduceCard.addView(mReduceIconsRow.row);
         reduceCard.addView(HyperSettingsUi.createInsetDivider(this, mPalette));
@@ -342,7 +400,7 @@ public final class MainActivity extends Activity implements ModelDownloadManager
             boolean target = !mReduceSoundsRow.toggle.isChecked();
             view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
             mReduceSoundsRow.toggle.setChecked(target, true);
-            saveReduceOption(Config.KEY_REDUCE_NORMAL_SOUNDS, target, mReduceSoundsRow);
+            saveSwitchOption(Config.KEY_REDUCE_NORMAL_SOUNDS, target, mReduceSoundsRow);
         });
         reduceCard.addView(mReduceSoundsRow.row);
         reduceCard.addView(HyperSettingsUi.createInsetDivider(this, mPalette));
@@ -398,6 +456,19 @@ public final class MainActivity extends Activity implements ModelDownloadManager
         // 5. Section: 其他
         content.addView(HyperSettingsUi.createSmallTitle(this, mPalette, "其他", 20));
         LinearLayout otherCard = HyperSettingsUi.createGroupCard(this, mPalette, 0);
+        mGlowStyleRow = HyperSettingsUi.createNavRow(
+                this,
+                mPalette,
+                "光效风格",
+                null,
+                GlowStyle.displayLabel(mGlowStyle),
+                false,
+                true,
+                false);
+        mGlowStyleRow.row.setOnClickListener(v -> showGlowStyleDialog());
+        otherCard.addView(mGlowStyleRow.row);
+        otherCard.addView(HyperSettingsUi.createInsetDivider(this, mPalette));
+
         HyperSettingsUi.NavRowParts aboutRow = HyperSettingsUi.createNavRow(
                 this,
                 mPalette,
@@ -405,7 +476,7 @@ public final class MainActivity extends Activity implements ModelDownloadManager
                 null,
                 resolveVersionDisplay(),
                 false,
-                true,
+                false,
                 true);
         aboutRow.row.setOnClickListener(v ->
                 startActivity(new Intent(this, AboutActivity.class)));
@@ -419,7 +490,48 @@ public final class MainActivity extends Activity implements ModelDownloadManager
                 "请在 LSPosed 中启用本模块并重启设备。所有通知识别与摘要均在本地完成，不上传任何数据。"));
 
         applySummaryDependentAlpha(initialSummary);
+        setGlowStyleVisual(mGlowStyle, false);
         return shell.root;
+    }
+
+    private LinearLayout buildPromotionCard(boolean enabled) {
+        LinearLayout card = HyperSettingsUi.createGroupCard(this, mPalette, 0);
+
+        FrameLayout promotionPreviewWrap = new FrameLayout(this);
+        promotionPreviewWrap.setPadding(dp(16), dp(16), dp(16), dp(4));
+        mPromotionPreview = new HyperSettingsUi.PromotionPreviewView(this, mPalette);
+        mPromotionPreview.setPromotionEnabled(enabled, false);
+        promotionPreviewWrap.addView(mPromotionPreview, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        card.addView(promotionPreviewWrap, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        mPromotionRow = HyperSettingsUi.createSwitchRow(
+                this,
+                mPalette,
+                "噪音过滤",
+                "将识别出的广告收进「推广通知」，锁屏时隐藏。",
+                enabled,
+                false,
+                true);
+        mPromotionRow.row.setOnClickListener(view -> {
+            if (!mPromotionRow.row.isClickable()) return;
+            boolean target = !mPromotionRow.toggle.isChecked();
+            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+            setPromotionVisual(target, true);
+            saveSwitchOption(Config.KEY_PROMOTION_FILTER, target, mPromotionRow);
+        });
+        card.addView(mPromotionRow.row);
+        return card;
+    }
+
+    private void setPromotionVisual(boolean enabled, boolean animate) {
+        if (mPromotionRow != null) {
+            mPromotionRow.toggle.setChecked(enabled, animate);
+        }
+        if (mPromotionPreview != null) {
+            mPromotionPreview.setPromotionEnabled(enabled, animate);
+        }
     }
 
     private void setSummaryVisual(boolean enabled, boolean animate) {
@@ -453,9 +565,7 @@ public final class MainActivity extends Activity implements ModelDownloadManager
 
     private void renderReduceSubtitle() {
         if (mReduceRow == null) return;
-        boolean modelReady = mLastConfig != null
-                ? mLastConfig.getBoolean(Config.KEY_MODEL_READY, false)
-                : ModelCatalog.isModelDirValid(new File(Config.DEFAULT_MODEL_PATH));
+        boolean modelReady = mLastConfig != null && mLastConfig.getBoolean(Config.KEY_MODEL_READY);
         if (!modelReady) {
             mReduceRow.summary.setText("使用系统勿扰规则。下载模型后可智能放行重要通知。");
         } else {
@@ -497,6 +607,75 @@ public final class MainActivity extends Activity implements ModelDownloadManager
         renderAlwaysLoadSubtitle(enabled);
     }
 
+    private void showGlowStyleDialog() {
+        if (mGlowStyleBusy) return;
+        int selected = Config.isXiaoAiGlow(mGlowStyle) ? 0 : 1;
+        List<HyperSettingsUi.ChoiceItem> items = Arrays.asList(
+                new HyperSettingsUi.ChoiceItem(
+                        "超级小爱流光",
+                        "暖橙、粉红与电光紫蓝霓虹光效，贴合澎湃超级岛质感"),
+                new HyperSettingsUi.ChoiceItem(
+                        "星云极光",
+                        "经典天青、晴空蓝与冰紫液态玻璃光效")
+        );
+        HyperSettingsUi.showChoiceDialog(this, mPalette, "光效风格", items, selected, index -> {
+            String target = index == 0 ? Config.GLOW_STYLE_XIAOAI : Config.GLOW_STYLE_NEBULA;
+            if (target.equals(mGlowStyle)) return;
+            String previous = mGlowStyle;
+            setGlowStyleVisual(target, true);
+            saveGlowStyle(target, previous);
+        });
+    }
+
+    private void setGlowStyleVisual(String style, boolean replayDemo) {
+        String normalized = Config.sanitizeGlowStyle(style);
+        mGlowStyle = normalized;
+        GlowStyle.setCurrent(normalized);
+        if (mGlowStyleRow != null) {
+            mGlowStyleRow.value.setText(GlowStyle.displayLabel(normalized));
+            mGlowStyleRow.value.setVisibility(View.VISIBLE);
+        }
+        boolean xiaoAi = Config.isXiaoAiGlow(normalized);
+        if (mSummaryPreview != null) mSummaryPreview.setGlowStyle(xiaoAi, replayDemo);
+        if (mPriorityPreview != null) mPriorityPreview.setGlowStyle(xiaoAi, replayDemo);
+        if (mReducePreview != null) mReducePreview.setGlowStyle(xiaoAi, replayDemo);
+        if (mPromotionPreview != null) mPromotionPreview.setGlowStyle(xiaoAi, replayDemo);
+    }
+
+    private void saveGlowStyle(String target, String previous) {
+        mGlowStyleBusy = true;
+        if (mGlowStyleRow != null) mGlowStyleRow.row.setClickable(false);
+        OPTION_IO.execute(() -> {
+            Bundle result = null;
+            try {
+                Bundle input = new Bundle();
+                input.putString(Config.KEY_GLOW_STYLE, target);
+                result = getContentResolver().call(PROVIDER, Config.METHOD_SET_CONFIG, null, input);
+                if (result != null && !"0".equals(result.getString("status"))) {
+                    result = null;
+                }
+            } catch (RuntimeException ignored) {
+            }
+            Bundle finalResult = result;
+            runOnUiThread(() -> {
+                if (isFinishing() || isDestroyed()) return;
+                mGlowStyleBusy = false;
+                if (mGlowStyleRow != null) mGlowStyleRow.row.setClickable(true);
+                if (finalResult != null) {
+                    mLastConfig = finalResult;
+                    String actual = Config.sanitizeGlowStyle(
+                            finalResult.getString(Config.KEY_GLOW_STYLE, target));
+                    if (!actual.equals(mGlowStyle)) {
+                        setGlowStyleVisual(actual, false);
+                    }
+                } else {
+                    setGlowStyleVisual(previous, false);
+                    Toast.makeText(this, "无法保存光效风格设置", Toast.LENGTH_SHORT).show();
+                }
+            });
+        });
+    }
+
     private void applySummaryDependentAlpha(boolean summaryEnabled) {
         if (mSummaryAdvancedRow != null) {
             float alpha = summaryEnabled ? 1.0f : 0.62f;
@@ -506,22 +685,24 @@ public final class MainActivity extends Activity implements ModelDownloadManager
     }
 
     private void refreshConfigFromProvider() {
-        new Thread(() -> {
+        OPTION_IO.execute(() -> {
             Bundle config = null;
             try {
                 config = getContentResolver().call(PROVIDER, "get_config", null, null);
             } catch (RuntimeException ignored) {
             }
             Bundle result = config;
+            ModelCatalog.ActiveSize size = ModelCatalog.ActiveSize.read(result);
             runOnUiThread(() -> {
                 if (isFinishing() || isDestroyed()) return;
                 if (result != null) {
+                    mActiveSize = size;
                     applyConfigBundle(result, false);
                 } else {
                     renderModelEntry();
                 }
             });
-        }, "LocalAiNotif-load-config").start();
+        });
     }
 
     private void saveSummaryEnabled(boolean target) {
@@ -640,9 +821,9 @@ public final class MainActivity extends Activity implements ModelDownloadManager
         }, "LocalAiNotif-save-reduce").start();
     }
 
-    private void saveReduceOption(String key, boolean target, HyperSettingsUi.SwitchRowParts row) {
+    private void saveSwitchOption(String key, boolean target, HyperSettingsUi.SwitchRowParts row) {
         row.row.setClickable(false);
-        new Thread(() -> {
+        OPTION_IO.execute(() -> {
             Bundle result = null;
             try {
                 Bundle input = new Bundle();
@@ -658,17 +839,32 @@ public final class MainActivity extends Activity implements ModelDownloadManager
                 if (isFinishing() || isDestroyed()) return;
                 row.row.setClickable(true);
                 if (finalResult != null) {
-                    row.toggle.setChecked(finalResult.getBoolean(key, target), true);
+                    mLastConfig = finalResult;
+                    boolean actual = finalResult.getBoolean(key, target);
+                    if (row == mPromotionRow) {
+                        setPromotionVisual(actual, true);
+                    } else {
+                        row.toggle.setChecked(actual, true);
+                    }
                 } else {
-                    row.toggle.setChecked(!target, true);
-                    Toast.makeText(this, "无法保存减少干扰设置", Toast.LENGTH_SHORT).show();
+                    if (row == mPromotionRow) {
+                        setPromotionVisual(!target, true);
+                        Toast.makeText(this, "无法保存噪音过滤设置", Toast.LENGTH_SHORT).show();
+                    } else {
+                        row.toggle.setChecked(!target, true);
+                        Toast.makeText(this, "无法保存设置", Toast.LENGTH_SHORT).show();
+                    }
                 }
             });
-        }, "LocalAiNotif-save-reduce-option").start();
+        });
     }
 
     private void applyConfigBundle(Bundle config, boolean animate) {
         mLastConfig = config;
+        if (mPromotionRow != null && mPromotionRow.row.isClickable()) {
+            boolean enabled = config.getBoolean(Config.KEY_PROMOTION_FILTER, Config.DEFAULT_PROMOTION_FILTER);
+            setPromotionVisual(enabled, animate);
+        }
         boolean priority = config.getBoolean(Config.KEY_PRIORITY_ENABLED, Config.DEFAULT_PRIORITY_ENABLED);
         boolean summary = config.getBoolean(Config.KEY_GROUP_SUMMARY, Config.DEFAULT_GROUP_SUMMARY);
         boolean reduce = config.getBoolean(Config.KEY_REDUCE_ENABLED, Config.DEFAULT_REDUCE_ENABLED);
@@ -699,15 +895,18 @@ public final class MainActivity extends Activity implements ModelDownloadManager
         if (!mAlwaysLoadBusy) {
             setAlwaysLoadVisual(alwaysLoad, animate);
         }
+        if (!mGlowStyleBusy) {
+            String glowStyle = Config.sanitizeGlowStyle(
+                    config.getString(Config.KEY_GLOW_STYLE, Config.DEFAULT_GLOW_STYLE));
+            setGlowStyleVisual(glowStyle, false);
+        }
         renderSummaryAdvancedSubtitle(config);
         renderModelEntry();
     }
 
     private void renderAlwaysLoadSubtitle(boolean alwaysLoad) {
         if (mAlwaysLoadRow == null) return;
-        boolean modelReady = mLastConfig != null
-                ? mLastConfig.getBoolean(Config.KEY_MODEL_READY, false)
-                : ModelCatalog.isModelDirValid(new File(Config.DEFAULT_MODEL_PATH));
+        boolean modelReady = mLastConfig != null && mLastConfig.getBoolean(Config.KEY_MODEL_READY);
         boolean engineLoaded = mLastConfig != null
                 && mLastConfig.getBoolean(Config.KEY_ENGINE_LOADED, false);
         boolean engineLoading = mLastConfig != null
@@ -787,7 +986,7 @@ public final class MainActivity extends Activity implements ModelDownloadManager
                 ? mLastConfig.getString(Config.KEY_MODEL_PATH, Config.DEFAULT_MODEL_PATH)
                 : Config.DEFAULT_MODEL_PATH;
         File dir = new File(modelPath);
-        boolean ready = ModelCatalog.isModelDirValid(dir);
+        boolean ready = mLastConfig != null && mLastConfig.getBoolean(Config.KEY_MODEL_READY);
         ModelCatalog.ModelSpec matched = ModelCatalog.findByPath(this, modelPath);
 
         mModelRow.statusDot.setVisibility(View.VISIBLE);
@@ -795,12 +994,12 @@ public final class MainActivity extends Activity implements ModelDownloadManager
         mModelRow.summary.setVisibility(View.VISIBLE);
 
         if (ready) {
-            long bytes = ModelCatalog.directorySizeBytes(dir);
             String displayName = matched != null ? matched.displayName : dir.getName();
             mModelRow.statusDot.setColor(mPalette.statusReady);
             mModelRow.value.setTextColor(mPalette.textSecondary);
             mModelRow.value.setText(displayName);
-            mModelRow.summary.setText("已就绪，占用 " + ModelCatalog.formatBytes(bytes));
+            mModelRow.summary.setText(mActiveSize != null && modelPath.equals(mActiveSize.path())
+                    ? "已就绪，占用 " + ModelCatalog.formatBytes(mActiveSize.bytes()) : "已就绪");
         } else {
             mModelRow.statusDot.setColor(mPalette.statusWarn);
             mModelRow.value.setTextColor(mPalette.accent);

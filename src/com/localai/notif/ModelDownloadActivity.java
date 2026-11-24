@@ -27,7 +27,7 @@ import java.util.Map;
 
 /**
  * HyperOS secondary page for downloading, inspecting, activating, and deleting
- * on-device MNN-LLM models (Qwen3-1.7B / Qwen3-0.6B / Qwen3-4B).
+ * on-device MNN-LLM models.
  */
 public final class ModelDownloadActivity extends Activity implements ModelDownloadManager.Listener {
     private static final Uri PROVIDER = Uri.parse("content://" + Config.AUTHORITY);
@@ -92,6 +92,9 @@ public final class ModelDownloadActivity extends Activity implements ModelDownlo
     private View mCatalogTitle;
     private LinearLayout mCatalogCard;
     private List<File> mLocalModels = List.of();
+    private Map<File, Long> mModelSizes = Map.of();
+    private long mAvailableBytes = -1;
+    private int mInventoryGeneration;
     private HyperSettingsUi.SwitchRowParts mWifiOnlyRow;
 
     private String mActiveModelPath = Config.DEFAULT_MODEL_PATH;
@@ -297,7 +300,7 @@ public final class ModelDownloadActivity extends Activity implements ModelDownlo
         content.addView(HyperSettingsUi.createFooter(
                 this,
                 mPalette,
-                "三档模型均为 MNN 官方 INT4 量化版本，文件仅保存在本机应用私有目录，切后台仍会通过前台通知持续下载。首次下载或切换完成后将自动重载推理引擎，无需重启设备。"));
+                "模型仅保存在本机。下载可在后台继续，切换模型后会自动重载推理引擎。"));
 
         return shell.root;
     }
@@ -590,7 +593,7 @@ public final class ModelDownloadActivity extends Activity implements ModelDownlo
                 : mManager.getSnapshot(spec.id).state;
         String name = spec == null ? dir.getName() : spec.displayName;
         Uri source = LocalModels.source(dir);
-        boolean installed = ModelCatalog.isModelDirValid(dir);
+        boolean installed = mModelSizes.containsKey(dir);
         boolean active = installed && ModelCatalog.canonicalOrAbsolute(dir)
                 .equals(ModelCatalog.canonicalOrAbsolute(new File(mActiveModelPath)));
 
@@ -650,7 +653,7 @@ public final class ModelDownloadActivity extends Activity implements ModelDownlo
 
         if (spec != null) addSpecLine(specBox, "量化格式", spec.quantizationLabel, false);
         addSpecLine(specBox, "磁盘占用", installed
-                ? ModelCatalog.formatBytes(ModelCatalog.directorySizeBytes(dir))
+                ? ModelCatalog.formatBytes(mModelSizes.get(dir))
                 : spec == null ? "文件缺失" : "约 " + ModelCatalog.formatBytes(spec.estimatedSizeBytes), spec != null);
         if (spec != null) {
             addSpecLine(specBox, "推理峰值内存", spec.peakRamLabel, true);
@@ -659,6 +662,15 @@ public final class ModelDownloadActivity extends Activity implements ModelDownlo
         if (source != null) addPathLine(specBox, "原文件夹", LocalModels.sourceLabel(source));
         addPathLine(specBox, "模块保存位置", "files/" + getFilesDir().toPath().relativize(dir.toPath()));
         sheet.addView(specBox, specBoxLp);
+        if (spec != null) {
+            TextView note = HyperSettingsUi.createFooter(this, mPalette,
+                    "骁龙 8 至尊版实测。内存为推理进程峰值，NPU 专用内存未单独计量。"
+                            + "响应用时取同一条短通知摘要的三次中位数，不含模型加载。");
+            LinearLayout.LayoutParams noteLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            noteLp.topMargin = dp(8);
+            sheet.addView(note, noteLp);
+        }
 
         // Contextual actions
         LinearLayout actions = new LinearLayout(this);
@@ -702,7 +714,7 @@ public final class ModelDownloadActivity extends Activity implements ModelDownlo
             });
             addActionButton(actions, cancelBtn, true);
         } else if (installed) {
-            long sizeBytes = ModelCatalog.directorySizeBytes(dir);
+            long sizeBytes = mModelSizes.get(dir);
             if (!active) {
                 TextView activateBtn = HyperSettingsUi.createSheetButton(
                         this, mPalette, "设为当前模型", HyperSettingsUi.CapsuleStyle.PRIMARY_BLUE);
@@ -795,6 +807,7 @@ public final class ModelDownloadActivity extends Activity implements ModelDownlo
 
         TextView vView = new TextView(this);
         vView.setText(value);
+        vView.setGravity(Gravity.END);
         vView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12.5f);
         vView.setTypeface(HyperSettingsUi.typeface(500));
         vView.setTextColor(mPalette.textPrimary);
@@ -816,7 +829,7 @@ public final class ModelDownloadActivity extends Activity implements ModelDownlo
         if (wasActive) {
             File fallback = new File(Config.DEFAULT_MODEL_PATH);
             note += !ModelCatalog.canonicalOrAbsolute(dir).equals(ModelCatalog.canonicalOrAbsolute(fallback))
-                    && ModelCatalog.isModelDirValid(fallback) ? "删除后将切回 Qwen3-1.7B。" : "删除后当前模型将卸载。";
+                    && mModelSizes.containsKey(fallback) ? "删除后将切回 Qwen3.5-0.8B。" : "删除后当前模型将卸载。";
         }
         HyperSettingsUi.showConfirmDialog(
                 this,
@@ -872,7 +885,7 @@ public final class ModelDownloadActivity extends Activity implements ModelDownlo
 
     private void activateModel(File dir, String displayName) {
         if (mSwitchBusy) return;
-        if (!ModelCatalog.isModelDirValid(dir)) {
+        if (!mModelSizes.containsKey(dir)) {
             Toast.makeText(this, "模型文件不完整，请重新下载", Toast.LENGTH_SHORT).show();
             return;
         }
@@ -882,7 +895,9 @@ public final class ModelDownloadActivity extends Activity implements ModelDownlo
             try {
                 Bundle input = new Bundle();
                 input.putString(Config.KEY_MODEL_PATH, dir.getAbsolutePath());
-                res = getContentResolver().call(PROVIDER, Config.METHOD_SET_MODEL_PATH, null, input);
+                if (ModelCatalog.isModelDirValid(dir)) {
+                    res = getContentResolver().call(PROVIDER, Config.METHOD_SET_MODEL_PATH, null, input);
+                }
                 if (res != null && !"0".equals(res.getString("status"))) {
                     res = null;
                 }
@@ -955,6 +970,7 @@ public final class ModelDownloadActivity extends Activity implements ModelDownlo
     }
 
     private void refreshConfigAndUi() {
+        int generation = ++mInventoryGeneration;
         new Thread(() -> {
             Bundle result = null;
             List<File> localModels = LocalModels.list(this);
@@ -963,9 +979,19 @@ public final class ModelDownloadActivity extends Activity implements ModelDownlo
             } catch (RuntimeException ignored) {
             }
             Bundle finalResult = result;
+            Map<File, Long> sizes = new HashMap<>();
+            for (File model : localModels) sizes.put(model, ModelCatalog.directorySizeBytes(model));
+            File active = new File(result == null ? Config.DEFAULT_MODEL_PATH
+                    : result.getString(Config.KEY_MODEL_PATH, Config.DEFAULT_MODEL_PATH));
+            if (!sizes.containsKey(active) && ModelCatalog.isModelDirValid(active)) {
+                sizes.put(active, ModelCatalog.directorySizeBytes(active));
+            }
+            long available = ModelCatalog.availableStorageBytes(this);
             runOnUiThread(() -> {
-                if (isFinishing() || isDestroyed()) return;
+                if (isFinishing() || isDestroyed() || generation != mInventoryGeneration) return;
                 mLocalModels = localModels;
+                mModelSizes = sizes;
+                mAvailableBytes = available;
                 if (finalResult != null) {
                     applyConfig(finalResult, false);
                 } else {
@@ -1028,11 +1054,11 @@ public final class ModelDownloadActivity extends Activity implements ModelDownlo
 
     private void renderStatusCard() {
         File activeDir = new File(mActiveModelPath);
-        boolean ready = ModelCatalog.isModelDirValid(activeDir);
+        boolean ready = mModelSizes.containsKey(activeDir);
         ModelCatalog.ModelSpec matched = ModelCatalog.findByPath(this, mActiveModelPath);
 
         if (ready) {
-            long sizeBytes = ModelCatalog.directorySizeBytes(activeDir);
+            long sizeBytes = mModelSizes.get(activeDir);
             String title = matched != null ? matched.displayName : activeDir.getName();
             mStatusDot.setColor(mPalette.statusReady);
             mStatusTitle.setText(title);
@@ -1063,7 +1089,7 @@ public final class ModelDownloadActivity extends Activity implements ModelDownlo
                     : "请选择设备上的模型，用于通知分类与 AI 摘要。");
         }
 
-        long avail = ModelCatalog.availableStorageBytes(this);
+        long avail = mAvailableBytes;
         if (avail >= 0L) {
             mStorageText.setText("设备可用存储 " + ModelCatalog.formatBytes(avail));
             mStorageText.setVisibility(View.VISIBLE);
@@ -1084,7 +1110,7 @@ public final class ModelDownloadActivity extends Activity implements ModelDownlo
         ModelCatalog.ModelSpec spec = h.spec;
         ModelDownloadManager.Snapshot snap = mManager.getSnapshot(spec.id);
         File dir = ModelCatalog.modelDir(this, spec);
-        boolean installed = ModelCatalog.isModelDirValid(dir);
+        boolean installed = mModelSizes.containsKey(dir);
         boolean active = isSpecActive(spec);
 
         if (snap.state == ModelDownloadManager.State.FETCHING_META) {
@@ -1172,7 +1198,7 @@ public final class ModelDownloadActivity extends Activity implements ModelDownlo
         h.progressTray.setVisibility(View.GONE);
         h.actionBtn.setEnabled(true);
         if (installed) {
-            long sizeBytes = ModelCatalog.directorySizeBytes(dir);
+            long sizeBytes = mModelSizes.get(dir);
             h.meta.setText("已下载 " + ModelCatalog.formatBytes(sizeBytes) + "，点击查看说明或管理");
             if (active) {
                 h.actionBtn.setText("使用中");
@@ -1194,7 +1220,7 @@ public final class ModelDownloadActivity extends Activity implements ModelDownlo
     private boolean isSpecActive(ModelCatalog.ModelSpec spec) {
         File target = ModelCatalog.modelDir(this, spec);
         File active = new File(mActiveModelPath);
-        if (!ModelCatalog.isModelDirValid(target)) return false;
+        if (!mModelSizes.containsKey(target)) return false;
         return ModelCatalog.canonicalOrAbsolute(target).equals(ModelCatalog.canonicalOrAbsolute(active));
     }
 

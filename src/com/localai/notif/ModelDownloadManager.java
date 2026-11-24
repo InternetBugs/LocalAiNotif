@@ -168,6 +168,12 @@ final class ModelDownloadManager {
 
     private ModelDownloadManager(Context appContext) {
         mAppContext = appContext;
+        new Thread(() -> {
+            File root = ModelCatalog.modelsRoot(appContext);
+            for (String retired : List.of("qwen3-0.6b-mnn", "qwen3-1.7b-mnn", "qwen3-4b-mnn")) {
+                ModelCatalog.deleteRecursively(new File(root, "." + retired + ".downloading"));
+            }
+        }, "LocalAiNotif-retired-downloads").start();
     }
 
     void addListener(Listener listener) {

@@ -1,0 +1,16 @@
+if(NOT CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+    return()
+endif()
+
+function(localai_configure_hexagon)
+    get_target_property(sources MNN_Hexagon SOURCES)
+    set(factory "${CMAKE_SOURCE_DIR}/source/backend/hexagon/execution/HexagonExecutionFactory.cpp")
+    if(NOT factory IN_LIST sources)
+        message(FATAL_ERROR "MNN Hexagon execution factory not found in the pinned source tree")
+    endif()
+    list(REMOVE_ITEM sources "${factory}")
+    list(APPEND sources "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/HexagonProjectionFactory.cpp")
+    set_property(TARGET MNN_Hexagon PROPERTY SOURCES "${sources}")
+endfunction()
+
+cmake_language(DEFER CALL localai_configure_hexagon)

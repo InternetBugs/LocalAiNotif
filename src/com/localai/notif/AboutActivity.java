@@ -70,6 +70,7 @@ public final class AboutActivity extends Activity {
     private String mSystemHookFramework = "";
     private boolean mHookProbePending;
     private Bundle mLastConfig;
+    private ModelCatalog.ActiveSize mActiveSize;
 
     private boolean mReceiversRegistered;
     private final Runnable mHookProbeTimeout = () -> {
@@ -449,9 +450,11 @@ public final class AboutActivity extends Activity {
             } catch (RuntimeException ignored) {
             }
             Bundle finalConfig = config;
+            ModelCatalog.ActiveSize size = ModelCatalog.ActiveSize.read(config);
             runOnUiThread(() -> {
                 if (isFinishing() || isDestroyed()) return;
                 if (finalConfig != null) {
+                    mActiveSize = size;
                     applyConfigBundle(finalConfig, false);
                 } else {
                     renderModuleStatus();
@@ -560,9 +563,7 @@ public final class AboutActivity extends Activity {
                 ? mLastConfig.getString(Config.KEY_MODEL_PATH, Config.DEFAULT_MODEL_PATH)
                 : Config.DEFAULT_MODEL_PATH;
         File dir = new File(modelPath);
-        boolean ready = mLastConfig != null
-                ? mLastConfig.getBoolean(Config.KEY_MODEL_READY, ModelCatalog.isModelDirValid(dir))
-                : ModelCatalog.isModelDirValid(dir);
+        boolean ready = mLastConfig != null && mLastConfig.getBoolean(Config.KEY_MODEL_READY);
         boolean loaded = mLastConfig != null && mLastConfig.getBoolean(Config.KEY_ENGINE_LOADED, false);
         boolean loading = mLastConfig != null && mLastConfig.getBoolean(Config.KEY_ENGINE_LOADING, false);
         ModelCatalog.ModelSpec matched = ModelCatalog.findByPath(this, modelPath);
@@ -574,11 +575,12 @@ public final class AboutActivity extends Activity {
         if (ready) {
             String displayName = matched != null ? matched.displayName : dir.getName();
             String engineState = loading ? "正在加载" : (loaded ? "引擎已加载" : "引擎待机");
-            long bytes = ModelCatalog.directorySizeBytes(dir);
             mModelStatusRow.statusDot.setColor(mPalette.statusReady);
             mModelStatusRow.value.setTextColor(mPalette.textSecondary);
             mModelStatusRow.value.setText(displayName);
-            mModelStatusRow.summary.setText("已就绪（" + ModelCatalog.formatBytes(bytes) + "）· " + engineState);
+            String size = mActiveSize != null && modelPath.equals(mActiveSize.path())
+                    ? "（" + ModelCatalog.formatBytes(mActiveSize.bytes()) + "）" : "";
+            mModelStatusRow.summary.setText("已就绪" + size + " · " + engineState);
         } else {
             mModelStatusRow.statusDot.setColor(mPalette.statusWarn);
             mModelStatusRow.value.setTextColor(mPalette.statusWarn);

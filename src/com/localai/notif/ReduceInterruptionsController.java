@@ -723,6 +723,10 @@ final class ReduceInterruptionsController {
         return reduceActive && !pendingFingerprints.isEmpty();
     }
 
+    Set<String> pendingKeys() {
+        return Set.copyOf(pendingFingerprints.keySet());
+    }
+
     void retainActiveKeys(Set<String> activeKeys) {
         if (activeKeys == null) return;
         preExistingFingerprints.keySet().retainAll(activeKeys);

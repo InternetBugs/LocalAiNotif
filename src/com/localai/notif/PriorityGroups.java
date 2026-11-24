@@ -196,10 +196,8 @@ final class PriorityGroups {
     void reconcile(List<?> records, boolean enabled) throws ReflectiveOperationException {
         Map<App, List<Object>> members = new LinkedHashMap<>();
         Map<App, Object> summaries = new HashMap<>();
-        Map<String, Object> active = new HashMap<>();
         for (Object record : records) {
             StatusBarNotification sbn = sbn(record);
-            active.put(sbn.getKey(), record);
             if (PriorityNotification.isGroupSummary(sbn)) {
                 summaries.put(App.of(sbn), record);
             } else if (enabled && PriorityNotification.isMarked(sbn)) {
@@ -248,7 +246,7 @@ final class PriorityGroups {
         for (String key : new ArrayList<>(nativeGroups.keySet())) {
             if (grouped.contains(key)) continue;
             NativeGroup original = nativeGroups.remove(key);
-            Object record = active.get(key);
+            Object record = recordsByKey.get(key);
             if (record != null && sbn(record) == original.owner) updateOverride(record, original.owner, original.override);
         }
         for (App app : new ArrayList<>(groups.keySet())) {

@@ -17,6 +17,9 @@ final class AsyncConfig implements Supplier<Bundle> {
     private Bundle cached = new Bundle();
     private boolean loading;
     private boolean dirty;
+    private static final long[] RETRY_DELAYS_MS = {2_000L, 5_000L, 15_000L};
+    private int retryIndex;
+    private final Runnable retry = this::refresh;
 
     AsyncConfig(Handler handler, Executor executor, Supplier<Bundle> query, Runnable updated) {
         this.handler = handler;
@@ -36,6 +39,7 @@ final class AsyncConfig implements Supplier<Bundle> {
     }
 
     void refresh() {
+        handler.removeCallbacks(retry);
         if (loading) {
             dirty = true;
             return;
@@ -56,7 +60,13 @@ final class AsyncConfig implements Supplier<Bundle> {
                     refresh();
                     return;
                 }
-                if (value != null) cached = new Bundle(value);
+                if (value == null) {
+                    handler.postDelayed(retry, RETRY_DELAYS_MS[retryIndex]);
+                    retryIndex = Math.min(retryIndex + 1, RETRY_DELAYS_MS.length - 1);
+                    return;
+                }
+                retryIndex = 0;
+                cached = new Bundle(value);
                 updated.run();
             });
         });

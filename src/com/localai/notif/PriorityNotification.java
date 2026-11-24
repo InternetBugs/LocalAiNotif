@@ -12,6 +12,7 @@ final class PriorityNotification {
     private static final String GROUP_NAME = "com.localai.notif.priority";
     static final String CLASS_LIST = "localai_class_list";
     static final String VIP_LIST = "localai_vip_list";
+    private static final ThreadLocal<Object> publishingRecord = new ThreadLocal<>();
 
     private PriorityNotification() {}
 
@@ -59,6 +60,17 @@ final class PriorityNotification {
     static void notifyUpdated(Object listeners, Method notifyPosted, Object record, StatusBarNotification sbn)
             throws ReflectiveOperationException {
         sbn.getNotification().flags |= Notification.FLAG_ONLY_ALERT_ONCE;
-        notifyPosted.invoke(listeners, record, record);
+        Object previous = publishingRecord.get();
+        publishingRecord.set(record);
+        try {
+            notifyPosted.invoke(listeners, record, record);
+        } finally {
+            if (previous == null) publishingRecord.remove();
+            else publishingRecord.set(previous);
+        }
+    }
+
+    static boolean isPublishing(Object record) {
+        return record != null && record == publishingRecord.get();
     }
 }

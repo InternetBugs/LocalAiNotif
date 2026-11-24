@@ -14,6 +14,11 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
+    <queries>
+        <package android:name="com.android.systemui" />
+        <package android:name="com.android.settings" />
+    </queries>
+
     <application
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -21,8 +26,9 @@
         android:description="@string/description"
         android:theme="@android:style/Theme.DeviceDefault.Light"
         android:allowBackup="true"
-        android:debuggable="true"
-        android:extractNativeLibs="false">
+        android:extractNativeLibs="true">
+
+        <uses-native-library android:name="libcdsprpc.so" android:required="false" />
 
         <activity
             android:name=".MainActivity"

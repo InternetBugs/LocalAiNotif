@@ -38,6 +38,7 @@ public final class ModuleMain extends XposedModule {
         } else if ("com.android.systemui".equals(pkg)) {
             SystemUiGroupText.install(this, param.getDefaultClassLoader());
             SystemUiPrioritySection.install(this, param.getDefaultClassLoader());
+            SystemUiPromotions.install(this, param.getDefaultClassLoader());
             SystemUiReduceInterruptions.install(this, param.getDefaultClassLoader());
             SystemUiReduceIsland.install(this, param.getDefaultClassLoader());
         } else if ("com.android.settings".equals(pkg)) {
@@ -145,9 +146,12 @@ public final class ModuleMain extends XposedModule {
                         && !method.getName().equals("notifyRemovedLocked")
                         && !method.getName().equals("notifyRankingUpdateLocked")) continue;
                 method.setAccessible(true);
+                boolean posted = (method.getName().equals("notifyPostedLocked")
+                        || method.getName().equals("prepareNotifyPostedLocked"))
+                        && method.getParameterCount() > 0 && method.getParameterTypes()[0] == record;
                 hook(method).intercept(chain -> {
                     Object result = chain.proceed();
-                    refreshSummaries();
+                    if (!posted || !PriorityNotification.isPublishing(chain.getArg(0))) refreshSummaries();
                     return result;
                 });
             }
@@ -182,7 +186,7 @@ public final class ModuleMain extends XposedModule {
             // NMS.mContext field: "getContext" method is absent from the on-device NMS (dump verified).
             Context context = (Context) findField(sNotificationService.getClass(), "mContext")
                     .get(sNotificationService);
-            sSummaries = new NotificationSummaries(this, context, sNotificationService, sHyperNotifService,
+            sSummaries = new NotificationSummaries(this, context, sNotificationService,
                     cl, () -> queryModuleConfig(context));
             log(Log.INFO, TAG, "Notification summary controller ready");
         } catch (Exception e) {

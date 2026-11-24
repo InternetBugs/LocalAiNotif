@@ -2,13 +2,12 @@ package com.localai.notif;
 
 import android.content.Context;
 import android.graphics.Canvas;
-import android.graphics.LinearGradient;
-import android.graphics.Matrix;
+import android.graphics.Color;
+import android.graphics.Outline;
 import android.graphics.Paint;
 import android.graphics.Path;
-import android.graphics.RectF;
-import android.graphics.Shader;
-import android.graphics.SweepGradient;
+import android.graphics.Rect;
+import android.graphics.RenderNode;
 import android.graphics.Typeface;
 import android.service.notification.StatusBarNotification;
 import android.util.Log;
@@ -59,6 +58,7 @@ final class SystemUiPrioritySection {
     private final Map<ViewGroup, PrioritySectionFrame> activeFrames = new WeakHashMap<>();
     private final Set<View> touchedStacks = Collections.newSetFromMap(new WeakHashMap<>());
     private final NotificationPresentation presentation = new NotificationPresentation();
+    private PriorityShadeRevealAnimator shadeRevealAnimator;
     private Object deferredStabilityManager;
     private final Class<?> sectionerType;
     private final Class<?> entryType;
@@ -159,14 +159,15 @@ final class SystemUiPrioritySection {
         Method drawChild = requireMethod(stack, "drawChild", Canvas.class, View.class, long.class);
 
         hookPromotion(module, loader);
+        hookMergedCardLayout(module, loader);
         module.hook(drawChild).intercept(chain -> {
             PrioritySectionFrame frame = activeFrames.get(chain.getThisObject());
-            if (frame == null || !frame.isHeading(chain.getArg(1))) return chain.proceed();
-            if (!frame.isVisible()) return false;
+            if (frame == null || !frame.isFooter(chain.getArg(1))) return chain.proceed();
+            if (!frame.isFooterVisible()) return false;
             Canvas canvas = (Canvas) chain.getArg(0);
             int saved = canvas.save();
             try {
-                canvas.translate(frame.headingOffsetX(), frame.headingOffset());
+                canvas.translate(frame.footerOffsetX(), frame.footerOffsetY());
                 return chain.proceed();
             } finally {
                 canvas.restoreToCount(saved);
@@ -203,7 +204,7 @@ final class SystemUiPrioritySection {
                 for (Object visibleEntry : visible) collectPresented(visibleEntry, versions);
                 View stackRoot = (View) stackView.get(containerOwner.get(listContainer.get(nodeController.get(root))));
                 presentation.afterRender(stackRoot, versions);
-                addHeader(root, nodeBuilder, visible);
+                addHeader(root, nodeBuilder, visible, stackRoot instanceof ViewGroup vg ? vg : null);
                 addReducePill(root);
             } catch (Exception e) {
                 module.log(Log.WARN, TAG, "Failed to render priority section heading", e);
@@ -247,6 +248,11 @@ final class SystemUiPrioritySection {
             hookIslandQuietFilter(module, loader, builder);
         } catch (ReflectiveOperationException | RuntimeException e) {
             module.log(Log.WARN, TAG, "Could not connect to the keyguard island filter", e);
+        }
+        try {
+            shadeRevealAnimator = new PriorityShadeRevealAnimator(module, loader, stack);
+        } catch (ReflectiveOperationException | RuntimeException e) {
+            module.log(Log.ERROR, TAG, "Failed to hook priority shade reveal animator", e);
         }
     }
 
@@ -490,6 +496,7 @@ final class SystemUiPrioritySection {
 
     private ReducePill createReducePill(Object rootController) throws Exception {
         Context context = ((View) getView.invoke(rootController)).getContext();
+        GlowStyle.initInSystemUi(context);
         int layout = context.getResources().getIdentifier(
                 "status_bar_notification_section_header", "layout", "com.android.systemui");
         ViewGroup header = (ViewGroup) LayoutInflater.from(context).inflate(layout, null, false);
@@ -632,41 +639,402 @@ final class SystemUiPrioritySection {
         return true;
     }
 
-    private void addHeader(Object root, Object builder, List<?> entries) throws Exception {
+    private void addHeader(Object root, Object builder, List<?> entries, ViewGroup stackRoot)
+            throws Exception {
         Object rootController = nodeController.get(root);
         List<View> rows = new ArrayList<>();
         Object firstController = null;
-        View following = null;
+        Object lastPriorityController = null;
         for (Object entry : entries) {
             Object section = attachedSection.get(attachState.get(entry));
             boolean priority = section != null && sectioners.contains(activeSectioner.get(section));
             if (!priority) {
-                if (firstController != null) {
-                    Object followingNode = buildNotifNode.invoke(builder, root, entry);
-                    following = (View) getView.invoke(nodeController.get(followingNode));
-                    break;
-                }
                 continue;
             }
             Object node = buildNotifNode.invoke(builder, root, entry);
             Object controller = nodeController.get(node);
             if (firstController == null) firstController = controller;
+            lastPriorityController = controller;
             rows.add((View) getView.invoke(controller));
         }
+        PriorityPresentation existing = headers.get(rootController);
         if (rows.isEmpty()) {
-            PriorityPresentation existing = headers.get(rootController);
-            if (existing != null) existing.frame().setRows(rows, null);
+            if (existing != null) existing.frame().setRows(rows);
+            if (shadeRevealAnimator != null) {
+                shadeRevealAnimator.updateMembership(
+                        stackRoot, existing != null ? existing.header() : null, rows, Collections.emptyList());
+            }
             return;
         }
         @SuppressWarnings("unchecked")
         List<Object> children = (List<Object>) nodeChildren.get(root);
+        int firstIndex = -1;
+        int lastIndex = -1;
         for (int index = 0; index < children.size(); index++) {
-            if (nodeController.get(children.get(index)) == firstController) {
-                PriorityPresentation presentation = headerFor(rootController);
-                presentation.frame().setRows(rows, following);
-                children.add(index, newNode.newInstance(root, presentation.controller()));
-                return;
+            Object ctrl = nodeController.get(children.get(index));
+            if (firstIndex < 0 && ctrl == firstController) firstIndex = index;
+            if (ctrl == lastPriorityController) lastIndex = index;
+        }
+        List<View> ordinaryRows = new ArrayList<>();
+        if (lastIndex >= 0) {
+            for (int index = lastIndex + 1; index < children.size(); index++) {
+                Object ctrl = nodeController.get(children.get(index));
+                if (ctrl == null) continue;
+                Object viewObj = getView.invoke(ctrl);
+                if (viewObj instanceof View v) {
+                    ordinaryRows.add(v);
+                }
             }
+        }
+        if (firstIndex >= 0 && lastIndex >= 0) {
+            PriorityPresentation presentation = headerFor(rootController);
+            presentation.frame().setRows(rows);
+            // Insert shared Priority Footer immediately AFTER the last priority row
+            children.add(lastIndex + 1, newNode.newInstance(root, presentation.controller()));
+            if (shadeRevealAnimator != null) {
+                shadeRevealAnimator.updateMembership(stackRoot, presentation.header(), rows, ordinaryRows);
+            }
+            return;
+        }
+        if (shadeRevealAnimator != null) {
+            shadeRevealAnimator.updateMembership(
+                    stackRoot, existing != null ? existing.header() : null, rows, ordinaryRows);
+        }
+    }
+
+    /**
+     * Hooks HyperOS 4's stack gap calculation, native Liquid Glass / Blur background outline,
+     * group background visibility, and lockscreen stacking interactor so docked priority rows +
+     * shared Footer merge into one zero-seam native glass card.
+     */
+    private void hookMergedCardLayout(ModuleMain module, ClassLoader loader) {
+        // 1. Zero-gap joining between priority rows & Footer + clean breathing gap below Footer
+        try {
+            Class<?> algoClass = loader.loadClass(NOTIFICATION + "stack.StackScrollAlgorithm");
+            Class<?> expViewClass = loader.loadClass(NOTIFICATION + "row.ExpandableView");
+            Method getGap = requireMethod(algoClass, "getGapHeightForChild", expViewClass, expViewClass);
+            Field padField = requireField(algoClass, "mPaddingBetweenElements");
+            Field hostViewField = requireField(algoClass, "mHostView");
+            module.hook(getGap).intercept(chain -> {
+                float defaultGap = (float) chain.proceed();
+                try {
+                    Object algo = chain.getThisObject();
+                    Object hostObj = hostViewField.get(algo);
+                    PrioritySectionFrame frame = activeFrames.get(hostObj);
+                    if (frame == null) return defaultGap;
+                    View child = (View) chain.getArg(0);
+                    View prev = (View) chain.getArg(1);
+                    float pad = padField.getFloat(algo);
+                    return frame.adjustGapHeight(child, prev, defaultGap, pad);
+                } catch (Throwable ignored) {
+                    return defaultGap;
+                }
+            });
+        } catch (Throwable t) {
+            module.log(Log.WARN, TAG, "Failed to hook StackScrollAlgorithm gap for merged priority card", t);
+        }
+
+        // 2. Unified native HyperOS NotificationBackgroundView height, Liquid Glass SDF & outline
+        try {
+            Class<?> nbvClass = loader.loadClass(NOTIFICATION + "row.NotificationBackgroundView");
+            Class<?> nbviClass = loader.loadClass(NOTIFICATION + "row.NotificationBackgroundViewInjectorImpl");
+            Class<?> outlineProvClass = loader.loadClass(
+                    NOTIFICATION + "row.NotificationBackgroundViewInjectorImpl$outlineProvider$1");
+            Method getActualHeight = requireMethod(nbvClass, "getActualHeight");
+            Method setClipBottom = requireMethod(nbvClass, "setClipBottomAmount", int.class);
+            Method setBottomOverlap = requireMethod(nbvClass, "setBottomOverlap", int.class);
+            Method getOutline = requireMethod(outlineProvClass, "getOutline", View.class, Outline.class);
+            Method viewGetRenderNode = ModuleMain.findMethod(View.class, "getRenderNode");
+
+            module.hook(getActualHeight).intercept(chain -> {
+                Integer overrideH = PrioritySectionFrame.mergedHeightOverrideFor(chain.getThisObject());
+                return overrideH != null ? overrideH : chain.proceed();
+            });
+            module.hook(setClipBottom).intercept(chain -> {
+                if (PrioritySectionFrame.mergedHeightOverrideFor(chain.getThisObject()) != null) {
+                    return chain.proceed(new Object[]{0});
+                }
+                return chain.proceed();
+            });
+            module.hook(setBottomOverlap).intercept(chain -> {
+                if (PrioritySectionFrame.mergedHeightOverrideFor(chain.getThisObject()) != null) {
+                    return chain.proceed(new Object[]{0});
+                }
+                return chain.proceed();
+            });
+            module.hook(getOutline).intercept(chain -> {
+                Object result = chain.proceed();
+                View view = (View) chain.getArg(0);
+                Integer overrideH = PrioritySectionFrame.mergedHeightOverrideFor(view);
+                if (overrideH != null && overrideH > 0) {
+                    Outline outline = (Outline) chain.getArg(1);
+                    int w = view.getWidth();
+                    if (w > 0 && outline != null) {
+                        int left = view.getLeft();
+                        int top = view.getTop();
+                        int right = view.getRight();
+                        if (viewGetRenderNode != null) {
+                            try {
+                                Object rn = viewGetRenderNode.invoke(view);
+                                if (rn instanceof RenderNode renderNode) {
+                                    renderNode.setPosition(left, top, right, top + overrideH);
+                                }
+                            } catch (Throwable ignored) {}
+                        }
+                        float fallbackR = 25f * view.getResources().getDisplayMetrics().density;
+                        float r = PrioritySectionFrame.mergedRadiusFor(view, fallbackR);
+                        outline.setRoundRect(0, 0, w, overrideH, r);
+                    }
+                }
+                return result;
+            });
+
+            // Prevent MIUI group expand/collapse animators from switching hostBg to OutlineMode.SUMMARY
+            try {
+                Field nbviViewField = requireField(nbviClass, "view");
+                Method updateBgOutline = requireMethod(nbviClass, "updateBackgroundOutline",
+                        boolean.class, boolean.class);
+                Method updateSummaryOutline = requireMethod(nbviClass, "updateSummaryBackgroundOutline",
+                        int.class, boolean.class);
+                module.hook(updateSummaryOutline).intercept(chain -> {
+                    Object inj = chain.getThisObject();
+                    try {
+                        Object bgObj = nbviViewField.get(inj);
+                        if (PrioritySectionFrame.isForcedVisibleHostBackground(bgObj)) {
+                            updateBgOutline.invoke(inj, false, false);
+                            return null;
+                        }
+                    } catch (Throwable ignored) {}
+                    return chain.proceed();
+                });
+            } catch (Throwable t) {
+                module.log(Log.WARN, TAG, "Failed to hook updateSummaryBackgroundOutline", t);
+            }
+
+            // Keep HyperOS Liquid Glass SDF height locked to merged height across relayout/effect updates
+            try {
+                Class<?> glassCompatClass = loader.loadClass("com.miui.systemui.util.MiGlassCompat");
+                Method setSdfMax = requireMethod(glassCompatClass, "setMiGlassSdfMaxSizeCompat",
+                        View.class, float.class, float.class);
+                module.hook(setSdfMax).intercept(chain -> {
+                    Integer overrideH = PrioritySectionFrame.mergedHeightOverrideFor(chain.getArg(0));
+                    if (overrideH != null && overrideH > 0) {
+                        return chain.proceed(new Object[]{
+                                chain.getArg(0),
+                                chain.getArg(1),
+                                (float) overrideH
+                        });
+                    }
+                    return chain.proceed();
+                });
+            } catch (Throwable t) {
+                module.log(Log.WARN, TAG, "Failed to hook MiGlassCompat SDF max size", t);
+            }
+        } catch (Throwable t) {
+            module.log(Log.WARN, TAG, "Failed to hook NotificationBackgroundView for unified glass card", t);
+        }
+
+        // 3. Airtight host backdrop locking & suppressed background blocking across all HyperOS animators
+        try {
+            Class<?> expViewClass = loader.loadClass(NOTIFICATION + "row.ExpandableView");
+            Method updateClipping = requireMethod(expViewClass, "updateClipping");
+            module.hook(updateClipping).intercept(chain -> {
+                Object result = chain.proceed();
+                if (chain.getThisObject() instanceof View v) {
+                    Integer mergedH = PrioritySectionFrame.mergedRowHeightOverrideFor(v);
+                    if (mergedH != null && mergedH > 0) {
+                        int w = v.getWidth();
+                        Rect cb = v.getClipBounds();
+                        if (cb != null && w > 0 && (cb.bottom < mergedH || cb.right < w)) {
+                            cb.bottom = Math.max(cb.bottom, mergedH);
+                            cb.right = Math.max(cb.right, w);
+                            v.setClipBounds(cb);
+                        }
+                    }
+                }
+                return result;
+            });
+
+            // Hard draw-time suppression: suppressed NotificationBackgroundViews NEVER enter RenderNode tree
+            Class<?> expOutlineClass = loader.loadClass(NOTIFICATION + "row.ExpandableOutlineView");
+            Method rowDrawChild = requireMethod(expOutlineClass, "drawChild",
+                    Canvas.class, View.class, long.class);
+            module.hook(rowDrawChild).intercept(chain -> {
+                if (PrioritySectionFrame.isSuppressedBackground(chain.getArg(1))) {
+                    return false;
+                }
+                return chain.proceed();
+            });
+
+            Class<?> nbvBaseClass = loader.loadClass(
+                    "com.miui.systemui.notification.row.NotificationBackgroundViewBase");
+            Method nbvSetAlpha = requireMethod(nbvBaseClass, "setAlpha", float.class);
+            module.hook(nbvSetAlpha).intercept(chain -> {
+                Object bgObj = chain.getThisObject();
+                if (PrioritySectionFrame.isForcedVisibleHostBackground(bgObj)) {
+                    return chain.proceed(new Object[]{1f});
+                }
+                if (PrioritySectionFrame.isSuppressedBackground(bgObj)) {
+                    return chain.proceed(new Object[]{0f});
+                }
+                return chain.proceed();
+            });
+
+            Method nbvSetTransX = requireMethod(nbvBaseClass, "setTranslationX", float.class);
+            module.hook(nbvSetTransX).intercept(chain -> {
+                if (PrioritySectionFrame.isForcedVisibleHostBackground(chain.getThisObject())) {
+                    return chain.proceed(new Object[]{0f});
+                }
+                return chain.proceed();
+            });
+
+            // Lock PropertiesFrameLayout deferred & super transforms on active hostBg so group expand
+            // animators cannot shift hostBg down below "Shell(2) ^" or leave super.translationY stuck!
+            Class<?> propLayoutClass = loader.loadClass("com.miui.systemui.widget.PropertiesFrameLayout");
+            Method pflSetTransY = requireMethod(propLayoutClass, "setTranslationY", float.class);
+            Method pflSetSuperTransY = requireMethod(propLayoutClass, "setSuperTranslationY", float.class);
+            Method pflSetScaleX = requireMethod(propLayoutClass, "setScaleX", float.class);
+            Method pflSetScaleY = requireMethod(propLayoutClass, "setScaleY", float.class);
+            Method pflSetSuperScaleX = requireMethod(propLayoutClass, "setSuperScaleX", float.class);
+            Method pflSetSuperScaleY = requireMethod(propLayoutClass, "setSuperScaleY", float.class);
+
+            module.hook(pflSetTransY).intercept(chain -> {
+                if (PrioritySectionFrame.isForcedVisibleHostBackground(chain.getThisObject())) {
+                    return chain.proceed(new Object[]{0f});
+                }
+                return chain.proceed();
+            });
+            module.hook(pflSetSuperTransY).intercept(chain -> {
+                if (PrioritySectionFrame.isForcedVisibleHostBackground(chain.getThisObject())) {
+                    return chain.proceed(new Object[]{0f});
+                }
+                return chain.proceed();
+            });
+            module.hook(pflSetScaleX).intercept(chain -> {
+                if (PrioritySectionFrame.isForcedVisibleHostBackground(chain.getThisObject())) {
+                    return chain.proceed(new Object[]{1f});
+                }
+                return chain.proceed();
+            });
+            module.hook(pflSetScaleY).intercept(chain -> {
+                if (PrioritySectionFrame.isForcedVisibleHostBackground(chain.getThisObject())) {
+                    return chain.proceed(new Object[]{1f});
+                }
+                return chain.proceed();
+            });
+            module.hook(pflSetSuperScaleX).intercept(chain -> {
+                if (PrioritySectionFrame.isForcedVisibleHostBackground(chain.getThisObject())) {
+                    return chain.proceed(new Object[]{1f});
+                }
+                return chain.proceed();
+            });
+            module.hook(pflSetSuperScaleY).intercept(chain -> {
+                if (PrioritySectionFrame.isForcedVisibleHostBackground(chain.getThisObject())) {
+                    return chain.proceed(new Object[]{1f});
+                }
+                return chain.proceed();
+            });
+
+            Class<?> rowClass = loader.loadClass(NOTIFICATION + "row.ExpandableNotificationRow");
+            Field bgField = requireField(rowClass, "mBackgroundNormal");
+            Method updateGroupBg = requireMethod(rowClass, "updateBackgroundForGroupState");
+            module.hook(updateGroupBg).intercept(chain -> {
+                Object result = chain.proceed();
+                try {
+                    Object bgObj = bgField.get(chain.getThisObject());
+                    if (bgObj instanceof View bg) {
+                        PrioritySectionFrame.enforceManagedBackgroundView(bg);
+                    }
+                } catch (Throwable ignored) {}
+                return result;
+            });
+
+            // Re-assert managed background states after ExpandableNotificationRow$NotificationViewState.applyToView
+            try {
+                Class<?> rowStateClass = loader.loadClass(
+                        NOTIFICATION + "row.ExpandableNotificationRow$NotificationViewState");
+                Method applyToView = requireMethod(rowStateClass, "applyToView", View.class);
+                module.hook(applyToView).intercept(chain -> {
+                    Object result = chain.proceed();
+                    if (PrioritySectionFrame.hasManagedBackgrounds()
+                            && chain.getArg(0) instanceof View rowView) {
+                        PrioritySectionFrame.enforceManagedBackgroundsForRow(rowView);
+                    }
+                    return result;
+                });
+            } catch (Throwable t) {
+                module.log(Log.WARN, TAG, "Failed to hook NotificationViewState.applyToView", t);
+            }
+
+            // Re-assert managed background states at the end of MIUI group expand ($3) & collapse ($5) animators
+            for (String suffix : new String[]{"$startBackgroundAnimation$3", "$startBackgroundAnimation$5"}) {
+                try {
+                    Class<?> animListenerClass = loader.loadClass(
+                            NOTIFICATION + "stack.NotificationChildrenContainerInjectorImpl" + suffix);
+                    Field summaryBgField = requireField(animListenerClass, "$summaryBackground");
+                    Field firstChildBgField = requireField(animListenerClass, "$firstChildBackground");
+                    Method onAnimEnd = requireMethod(animListenerClass, "onAnimationEnd",
+                            android.animation.Animator.class);
+                    module.hook(onAnimEnd).intercept(chain -> {
+                        Object result = chain.proceed();
+                        if (PrioritySectionFrame.hasManagedBackgrounds()) {
+                            try {
+                                Object listener = chain.getThisObject();
+                                if (summaryBgField.get(listener) instanceof View sbg) {
+                                    PrioritySectionFrame.enforceManagedBackgroundView(sbg);
+                                }
+                                if (firstChildBgField.get(listener) instanceof View cbg) {
+                                    PrioritySectionFrame.enforceManagedBackgroundView(cbg);
+                                }
+                            } catch (Throwable ignored) {}
+                        }
+                        return result;
+                    });
+                } catch (Throwable t) {
+                    module.log(Log.WARN, TAG, "Failed to hook group background animation listener " + suffix, t);
+                }
+            }
+        } catch (Throwable t) {
+            module.log(Log.WARN, TAG, "Failed to hook group background / clip state for priority merge", t);
+        }
+
+        // 4. Keep HyperOS Lockscreen stacking clear of our shared Priority Footer
+        try {
+            Class<?> interactorClass = loader.loadClass(
+                    "com.miui.systemui.notification.domain.interactor.NotificationStackingInteractor");
+            Class<?> expBaseClass = loader.loadClass(
+                    "com.miui.systemui.notification.row.ExpandableViewBase");
+            Class<?> infoClass = loader.loadClass(
+                    "com.miui.systemui.notification.view.NotificationRowStackingInfo");
+            Field emptyInfoField = requireField(infoClass, "EMPTY");
+            Object emptyInfo = emptyInfoField.get(null);
+            Method calcStacking = requireMethod(interactorClass, "calculateStackingInfo",
+                    expBaseClass, float.class, float.class, boolean.class, float.class);
+            module.hook(calcStacking).intercept(chain -> {
+                Object view = chain.getArg(0);
+                if (view != null) {
+                    for (PrioritySectionFrame frame : activeFrames.values()) {
+                        if (frame == null) continue;
+                        if (frame.isFooter(view)) {
+                            return emptyInfo;
+                        }
+                        float footerShift = frame.lockscreenStackingOffsetFor(view);
+                        if (footerShift > 0f) {
+                            float origY = (float) chain.getArg(1);
+                            return chain.proceed(new Object[]{
+                                    view,
+                                    origY - footerShift,
+                                    chain.getArg(2),
+                                    chain.getArg(3),
+                                    chain.getArg(4)
+                            });
+                        }
+                    }
+                }
+                return chain.proceed();
+            });
+        } catch (Throwable t) {
+            module.log(Log.WARN, TAG, "Failed to hook NotificationStackingInteractor for priority footer", t);
         }
     }
 
@@ -674,24 +1042,34 @@ final class SystemUiPrioritySection {
         PriorityPresentation existing = headers.get(rootController);
         if (existing != null) return existing;
         Context context = ((View) getView.invoke(rootController)).getContext();
+        GlowStyle.initInSystemUi(context);
         int layout = context.getResources().getIdentifier(
                 "status_bar_notification_section_header", "layout", "com.android.systemui");
         ViewGroup header = (ViewGroup) LayoutInflater.from(context).inflate(layout, null, false);
         ViewGroup contents = (ViewGroup) headerContents.get(header);
+        header.setPadding(0, 0, 0, 0);
+        header.setMinimumHeight(0);
         header.setClipChildren(false);
         header.setClipToPadding(false);
+        contents.setPadding(0, 0, 0, 0);
+        contents.setMinimumHeight(0);
+        if (contents.getLayoutParams() instanceof ViewGroup.MarginLayoutParams mlp) {
+            mlp.setMargins(0, 0, 0, 0);
+            mlp.width = ViewGroup.LayoutParams.MATCH_PARENT;
+            mlp.height = ViewGroup.LayoutParams.WRAP_CONTENT;
+        }
         contents.setClipChildren(false);
         contents.setClipToPadding(false);
         contents.removeAllViews();
-        PriorityCapsuleView capsule = new PriorityCapsuleView(context);
-        contents.addView(createTitleContainer(context, capsule), new ViewGroup.LayoutParams(
+        PriorityFooterView footerView = new PriorityFooterView(context);
+        contents.addView(footerView, new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         header.setLayoutParams(new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         header.setClickable(false);
         header.setFocusable(false);
         setHeaderVisible.invoke(header, true, false);
-        PrioritySectionFrame frame = new PrioritySectionFrame(header, contents, capsule, getClipHeight,
+        PrioritySectionFrame frame = new PrioritySectionFrame(header, contents, footerView, getClipHeight,
                 getClipTopAmount, getTopOverlap, getSuperAlpha, getSuperTransitionAlpha, getIsExpanded);
         header.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
             @Override
@@ -713,7 +1091,7 @@ final class SystemUiPrioritySection {
             try {
                 notifyHeaderHeightChanged.invoke(view, LABEL, false);
             } catch (ReflectiveOperationException e) {
-                Log.w(TAG, "Failed to update priority section heading height", e);
+                Log.w(TAG, "Failed to update priority section footer height", e);
             }
         });
 
@@ -728,105 +1106,63 @@ final class SystemUiPrioritySection {
                     case "equals" -> proxy == args[0];
                     default -> null;
                 });
-        PriorityPresentation presentation = new PriorityPresentation(controller, frame);
+        PriorityPresentation presentation = new PriorityPresentation(controller, header, frame);
         headers.put(rootController, presentation);
         return presentation;
     }
 
-    private record PriorityPresentation(Object controller, PrioritySectionFrame frame) {}
-
-    private static View createTitleContainer(Context context, PriorityCapsuleView capsule) {
-        FrameLayout frame = new FrameLayout(context);
-        frame.setClipChildren(false);
-        frame.setClipToPadding(false);
-        frame.setPaddingRelative(0, dp(context, 2), 0, dp(context, 6));
-        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.START);
-        frame.addView(capsule, params);
-        return frame;
-    }
+    private record PriorityPresentation(Object controller, View header, PrioritySectionFrame frame) {}
 
     /**
-     * Ultra-translucent HyperOS 4 liquid-glass micro-capsule header ("✦ 重要通知") with adaptive
-     * dark smoked-glass / light frosted-glass surfaces, cyan-violet 4-point sparkle, crisp 0.6dp
-     * specular rim, and synchronized one-shot Nebula Aurora shimmer.
+     * Apple Intelligence-inspired shared bottom Footer inside the merged Priority Notifications
+     * card: thin top hairline aligned to notification content edges + left-aligned monochrome
+     * 7-lobe woven ribbon icon + "重要通知" / "Priority Notifications" label with adaptive
+     * dark/light translucent ink and synchronized reveal icon glint.
      */
-    static final class PriorityCapsuleView extends View {
-        private static final int[] DARK_RIM = {
-                0x78EDF6FF, 0x565CE1FF, 0x52A17DFF, 0x38FFFFFF, 0x78EDF6FF
-        };
-        private static final int[] LIGHT_RIM = {
-                0x781CA3EC, 0x6A2B75F0, 0x727458F2, 0x8CFFFFFF, 0x781CA3EC
-        };
-        private static final int[] SHIMMER_COMET = {
-                0x005CE1FF, 0x005CE1FF, 0xC85CE1FF, 0xFFFFFFFF, 0xD4A17DFF, 0x00A17DFF, 0x005CE1FF
-        };
-        private static final float[] RIM_STOPS = {0f, 0.25f, 0.55f, 0.80f, 1f};
-        private static final float[] COMET_STOPS = {0f, 0.66f, 0.78f, 0.88f, 0.94f, 0.99f, 1f};
+    static final class PriorityFooterView extends View {
+        private static final float FOOTER_HEIGHT_DP = 40f;
+        private static final float CONTENT_INSET_DP = 16f;
+        private static final float ICON_SIZE_DP = 15.8f;
+        private static final float ICON_TEXT_GAP_DP = 6.5f;
 
         private final String label;
         private final float density;
-        private final float shadowPad;
-        private final float pillHeight;
-        private final float padStart;
-        private final float padEnd;
-        private final float sparkleRadius;
-        private final float iconTextGap;
+        private final float footerHeightPx;
+        private final float contentInsetPx;
+        private final float iconSizePx;
+        private final float iconTextGapPx;
 
-        private final Paint fillPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint sheenPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint rimPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint cometPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint sparklePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint sparkleGlowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint dividerPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint iconPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint iconGlintPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-
-        private final RectF pillRect = new RectF();
-        private final Path sparklePath = new Path();
-        private final Matrix shaderMatrix = new Matrix();
-
-        private LinearGradient surfaceShader;
-        private LinearGradient sheenShader;
-        private LinearGradient sparkleShader;
-        private SweepGradient rimShader;
-        private SweepGradient cometShader;
+        private final Path iconPath = new Path();
 
         private boolean darkAppearance = true;
-        private float shimmerProgress;
+        private boolean xiaoAiStyle = GlowStyle.isXiaoAi();
+        private float cardLocalLeft = Float.NaN;
+        private float cardLocalRight = Float.NaN;
         private float shimmerBoost;
-        private float cachedW = -1f;
-        private float cachedH = -1f;
-        private boolean cachedDark = true;
 
-        PriorityCapsuleView(Context context) {
+        PriorityFooterView(Context context) {
             super(context);
             density = context.getResources().getDisplayMetrics().density;
             String language = context.getResources().getConfiguration().getLocales().get(0).getLanguage();
-            label = "zh".equals(language) ? "重要通知" : "Important notifications";
+            label = "zh".equals(language) ? "重要通知" : "Priority Notifications";
 
-            shadowPad = 2f * density;
-            pillHeight = 25.5f * density;
-            padStart = 9.5f * density;
-            padEnd = 11f * density;
-            sparkleRadius = 5.3f * density;
-            iconTextGap = 5.5f * density;
+            footerHeightPx = FOOTER_HEIGHT_DP * density;
+            contentInsetPx = CONTENT_INSET_DP * density;
+            iconSizePx = ICON_SIZE_DP * density;
+            iconTextGapPx = ICON_TEXT_GAP_DP * density;
 
-            fillPaint.setStyle(Paint.Style.FILL);
-            sheenPaint.setStyle(Paint.Style.FILL);
-
-            rimPaint.setStyle(Paint.Style.STROKE);
-            rimPaint.setStrokeWidth(0.6f * density);
-
-            cometPaint.setStyle(Paint.Style.STROKE);
-            cometPaint.setStrokeWidth(0.95f * density);
-
-            sparklePaint.setStyle(Paint.Style.FILL);
-            sparkleGlowPaint.setStyle(Paint.Style.FILL);
+            dividerPaint.setStyle(Paint.Style.STROKE);
+            dividerPaint.setStrokeCap(Paint.Cap.BUTT);
+            dividerPaint.setStrokeWidth(Math.max(1f, 0.70f * density));
 
             textPaint.setTypeface(Typeface.create(Typeface.DEFAULT, 500, false));
             textPaint.setTextSize(TypedValue.applyDimension(
-                    TypedValue.COMPLEX_UNIT_SP, 12.2f, context.getResources().getDisplayMetrics()));
-            textPaint.setLetterSpacing(0.015f);
+                    TypedValue.COMPLEX_UNIT_SP, 13.2f, context.getResources().getDisplayMetrics()));
+            textPaint.setLetterSpacing(0.01f);
 
             setContentDescription(label);
             setAccessibilityHeading(true);
@@ -835,45 +1171,53 @@ final class SystemUiPrioritySection {
             applyInkStyle();
         }
 
+        void setCardHorizontalSpan(float localLeft, float localRight) {
+            if (Math.abs(cardLocalLeft - localLeft) < 0.5f
+                    && Math.abs(cardLocalRight - localRight) < 0.5f) {
+                return;
+            }
+            cardLocalLeft = localLeft;
+            cardLocalRight = localRight;
+            invalidate();
+        }
+
         void setDarkAppearance(boolean dark) {
             if (darkAppearance == dark) return;
             darkAppearance = dark;
             applyInkStyle();
-            invalidateShaders();
+            invalidate();
+        }
+
+        void setXiaoAiStyle(boolean xiaoAi) {
+            if (xiaoAiStyle == xiaoAi) return;
+            xiaoAiStyle = xiaoAi;
             invalidate();
         }
 
         void setShimmer(float progress, float boost) {
-            if (shimmerProgress == progress && shimmerBoost == boost) return;
-            shimmerProgress = progress;
+            if (shimmerBoost == boost) return;
             shimmerBoost = boost;
             invalidate();
         }
 
         private void applyInkStyle() {
             if (darkAppearance) {
-                textPaint.setColor(0xF5FFFFFF);
-                textPaint.setShadowLayer(1.6f * density, 0f, 0.55f * density, 0x5A000000);
+                dividerPaint.setColor(0x36FFFFFF);
+                iconPaint.setColor(0xDCFFFFFF);
+                textPaint.setColor(0xDCFFFFFF);
             } else {
-                textPaint.setColor(0xE0131A2B);
-                textPaint.clearShadowLayer();
+                dividerPaint.setColor(0x1E000000);
+                iconPaint.setColor(0xA6000000);
+                textPaint.setColor(0xA6000000);
             }
-        }
-
-        private void invalidateShaders() {
-            surfaceShader = null;
-            sheenShader = null;
-            sparkleShader = null;
-            rimShader = null;
-            cometShader = null;
         }
 
         @Override
         protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
-            float textWidth = textPaint.measureText(label);
-            float contentW = padStart + sparkleRadius * 2f + iconTextGap + textWidth + padEnd;
-            int w = Math.round(contentW + shadowPad * 2f);
-            int h = Math.round(pillHeight + shadowPad * 2f);
+            int w = MeasureSpec.getMode(widthMeasureSpec) == MeasureSpec.UNSPECIFIED
+                    ? Math.round(contentInsetPx * 2f + iconSizePx + iconTextGapPx + textPaint.measureText(label))
+                    : MeasureSpec.getSize(widthMeasureSpec);
+            int h = Math.round(footerHeightPx);
             setMeasuredDimension(
                     resolveSize(w, widthMeasureSpec),
                     resolveSize(h, heightMeasureSpec));
@@ -883,126 +1227,62 @@ final class SystemUiPrioritySection {
         protected void onDraw(Canvas canvas) {
             float w = getWidth();
             float h = getHeight();
-            if (w <= shadowPad * 2f || h <= shadowPad * 2f) return;
+            if (w <= 0f || h <= 0f) return;
 
-            pillRect.set(shadowPad, shadowPad, w - shadowPad, h - shadowPad);
-            float r = pillRect.height() * 0.5f;
-            float cx = pillRect.centerX();
-            float cy = pillRect.centerY();
-
-            ensureShaders(w, h);
-
-            // 1. Subtle ambient lift shadow for bright lockscreen wallpapers
-            fillPaint.setShader(null);
-            fillPaint.setColor(darkAppearance ? 0x2B050914 : 0x12142342);
-            canvas.save();
-            canvas.translate(0f, 0.9f * density);
-            canvas.drawRoundRect(pillRect, r, r, fillPaint);
-            canvas.restore();
-
-            // 2. Translucent liquid glass surface + top inner specular sheen
-            fillPaint.setAlpha(255);
-            fillPaint.setShader(surfaceShader);
-            canvas.drawRoundRect(pillRect, r, r, fillPaint);
-
-            sheenPaint.setAlpha(255);
-            sheenPaint.setShader(sheenShader);
-            canvas.drawRoundRect(pillRect, r, r, sheenPaint);
-
-            // 3. Crisp 0.6dp ice-white / Nebula specular rim
-            float inset = 0.35f * density;
-            pillRect.inset(inset, inset);
-            float rimR = pillRect.height() * 0.5f;
-
-            shaderMatrix.reset();
-            shaderMatrix.setRotate(-30f + shimmerProgress * 360f, cx, cy);
-            rimShader.setLocalMatrix(shaderMatrix);
-            rimPaint.setShader(rimShader);
-            rimPaint.setAlpha(Math.min(255, Math.round((0.88f + 0.12f * shimmerBoost) * 255f)));
-            canvas.drawRoundRect(pillRect, rimR, rimR, rimPaint);
-
-            // 4. Synchronized shimmer glint around the pill rim during the 1.4s sweep
-            if (shimmerBoost > 0.01f) {
-                shaderMatrix.reset();
-                shaderMatrix.setRotate(-115f + shimmerProgress * 360f, cx, cy);
-                cometShader.setLocalMatrix(shaderMatrix);
-                cometPaint.setShader(cometShader);
-                cometPaint.setAlpha(Math.min(255, Math.round(shimmerBoost * 225f)));
-                canvas.drawRoundRect(pillRect, rimR, rimR, cometPaint);
+            float spanLeft = Float.isNaN(cardLocalLeft) ? 0f : cardLocalLeft;
+            float spanRight = Float.isNaN(cardLocalRight) ? w : cardLocalRight;
+            if (spanRight - spanLeft < contentInsetPx * 2f + iconSizePx) {
+                spanLeft = 0f;
+                spanRight = w;
             }
 
-            // 5. Crisp 4-point Nebula AI sparkle + subtle shimmer bloom
-            float sparkleCx = shadowPad + padStart + sparkleRadius;
-            if (shimmerBoost > 0.01f) {
-                buildSparklePath(sparkleCx, cy, sparkleRadius * (1.28f + 0.12f * shimmerBoost));
-                sparkleGlowPaint.setColor(darkAppearance ? 0xFF9BEAFF : 0xFF5C9EFF);
-                sparkleGlowPaint.setAlpha(Math.round(shimmerBoost * 96f));
-                canvas.drawPath(sparklePath, sparkleGlowPaint);
+            // 1. Crisp internal horizontal hairline separating the notification body from Footer
+            float lineLeft = spanLeft + contentInsetPx;
+            float lineRight = spanRight - contentInsetPx;
+            float lineY = Math.max(0.5f, 0.5f * density);
+            canvas.drawLine(lineLeft, lineY, lineRight, lineY, dividerPaint);
+
+            // 2. Monochrome Apple Intelligence 7-lobe icon + label, aligned to content leading edge
+            boolean rtl = getLayoutDirection() == LAYOUT_DIRECTION_RTL;
+            float contentCenterY = (lineY + h) * 0.5f - 0.5f * density;
+            float textWidth = textPaint.measureText(label);
+
+            float iconLeft;
+            float textX;
+            if (rtl) {
+                iconLeft = lineRight - iconSizePx;
+                textX = iconLeft - iconTextGapPx - textWidth;
+            } else {
+                iconLeft = lineLeft;
+                textX = iconLeft + iconSizePx + iconTextGapPx;
             }
-            buildSparklePath(sparkleCx, cy, sparkleRadius);
-            sparklePaint.setShader(sparkleShader);
-            sparklePaint.setAlpha(255);
-            canvas.drawPath(sparklePath, sparklePaint);
+            float iconTop = contentCenterY - iconSizePx * 0.5f;
+
+            // Base monochrome 7-lobe icon
+            ReduceInterruptions.drawAppleIntelMono(
+                    canvas, iconLeft, iconTop, iconSizePx, iconPaint, 1.85f, iconPath);
+
+            // Synchronized subtle icon glint during the 1.6s one-shot reveal sweep
             if (shimmerBoost > 0.01f) {
-                sparkleGlowPaint.setColor(0xFFFFFFFF);
-                sparkleGlowPaint.setAlpha(Math.round(shimmerBoost * 165f));
-                canvas.drawPath(sparklePath, sparkleGlowPaint);
+                int glintColor = xiaoAiStyle
+                        ? (darkAppearance ? 0xFFFFB28A : 0xFFE53882)
+                        : (darkAppearance ? 0xFF8BEAFF : 0xFF3D8BFF);
+                int glintAlpha = Math.min(255, Math.round(shimmerBoost * (darkAppearance ? 140f : 115f)));
+                iconGlintPaint.setColor((glintAlpha << 24) | (glintColor & 0x00FFFFFF));
+                ReduceInterruptions.drawAppleIntelMono(
+                        canvas, iconLeft, iconTop, iconSizePx, iconGlintPaint, 2.05f, iconPath);
+                int coreAlpha = Math.min(255, Math.round(shimmerBoost * (darkAppearance ? 110f : 60f)));
+                if (coreAlpha > 0) {
+                    iconGlintPaint.setColor(Color.argb(coreAlpha, 255, 255, 255));
+                    ReduceInterruptions.drawAppleIntelMono(
+                            canvas, iconLeft, iconTop, iconSizePx, iconGlintPaint, 1.55f, iconPath);
+                }
             }
 
-            // 6. Crisp MiSans Medium title text
+            // Label
             Paint.FontMetrics fm = textPaint.getFontMetrics();
-            float baseline = cy - (fm.ascent + fm.descent) * 0.5f;
-            float textX = sparkleCx + sparkleRadius + iconTextGap;
+            float baseline = contentCenterY - (fm.ascent + fm.descent) * 0.5f;
             canvas.drawText(label, textX, baseline, textPaint);
-        }
-
-        private void buildSparklePath(float cx, float cy, float r) {
-            float inner = r * 0.25f;
-            sparklePath.reset();
-            sparklePath.moveTo(cx, cy - r);
-            sparklePath.quadTo(cx + inner * 0.42f, cy - inner * 0.42f, cx + r, cy);
-            sparklePath.quadTo(cx + inner * 0.42f, cy + inner * 0.42f, cx, cy + r);
-            sparklePath.quadTo(cx - inner * 0.42f, cy + inner * 0.42f, cx - r, cy);
-            sparklePath.quadTo(cx - inner * 0.42f, cy - inner * 0.42f, cx, cy - r);
-            sparklePath.close();
-        }
-
-        private void ensureShaders(float w, float h) {
-            if (surfaceShader != null && cachedDark == darkAppearance
-                    && Math.abs(cachedW - w) < 0.5f && Math.abs(cachedH - h) < 0.5f) {
-                return;
-            }
-            cachedW = w;
-            cachedH = h;
-            cachedDark = darkAppearance;
-
-            float top = shadowPad;
-            float bot = h - shadowPad;
-            float cx = w * 0.5f;
-            float cy = h * 0.5f;
-
-            surfaceShader = new LinearGradient(
-                    0f, top, 0f, bot,
-                    darkAppearance ? 0x7A1C253A : 0xD6F8FBFF,
-                    darkAppearance ? 0x5E111726 : 0xBEEBF3FE,
-                    Shader.TileMode.CLAMP);
-            sheenShader = new LinearGradient(
-                    0f, top, 0f, top + (bot - top) * 0.52f,
-                    darkAppearance ? 0x26FFFFFF : 0x6AFFFFFF,
-                    0x00FFFFFF,
-                    Shader.TileMode.CLAMP);
-
-            float sx = shadowPad + padStart;
-            sparkleShader = new LinearGradient(
-                    sx, cy - sparkleRadius,
-                    sx + sparkleRadius * 2f, cy + sparkleRadius,
-                    darkAppearance ? 0xFF64E6FF : 0xFF1CA3EC,
-                    darkAppearance ? 0xFFA685FF : 0xFF7458F2,
-                    Shader.TileMode.CLAMP);
-
-            rimShader = new SweepGradient(cx, cy,
-                    darkAppearance ? DARK_RIM : LIGHT_RIM, RIM_STOPS);
-            cometShader = new SweepGradient(cx, cy, SHIMMER_COMET, COMET_STOPS);
         }
     }
 

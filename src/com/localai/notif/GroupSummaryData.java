@@ -21,6 +21,13 @@ final class GroupSummaryData {
     static final String SUMMARIZING_FP = "localai.group_summarizing_fp";
     static final int AI_FLAG = 0x10000000;
     static final int MAX_ITEMS = 10;
+    private static final ThreadLocal<MessageDigest> SHA256 = ThreadLocal.withInitial(() -> {
+        try {
+            return MessageDigest.getInstance("SHA-256");
+        } catch (java.security.NoSuchAlgorithmException exception) {
+            throw new AssertionError(exception);
+        }
+    });
 
     private GroupSummaryData() {}
 
@@ -82,18 +89,15 @@ final class GroupSummaryData {
     }
 
     private static String digest(List<String> values) {
-        try {
-            MessageDigest hash = MessageDigest.getInstance("SHA-256");
-            for (String value : values) {
-                byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
-                hash.update(Integer.toString(bytes.length).getBytes(StandardCharsets.US_ASCII));
-                hash.update((byte) ':');
-                hash.update(bytes);
-            }
-            return HexFormat.of().formatHex(hash.digest());
-        } catch (java.security.NoSuchAlgorithmException e) {
-            throw new AssertionError(e);
+        MessageDigest hash = SHA256.get();
+        hash.reset();
+        for (String value : values) {
+            byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+            hash.update(Integer.toString(bytes.length).getBytes(StandardCharsets.US_ASCII));
+            hash.update((byte) ':');
+            hash.update(bytes);
         }
+        return HexFormat.of().formatHex(hash.digest());
     }
 
     static String clean(String content) {

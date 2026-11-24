@@ -12,11 +12,14 @@ public final class Config {
     public static final int DEFAULT_WAIT_SECONDS = 0;
     public static final String KEY_MODEL_PATH = "model_path";
     public static final String DEFAULT_MODEL_PATH =
-            "/data/user/0/com.localai.notif/files/models/qwen3-1.7b-mnn";
+            "/data/user/0/com.localai.notif/files/models/qwen3.5-0.8b-mnn";
     public static final String KEY_CLASSIFY_ENABLED = "classify_enabled";
     public static final boolean DEFAULT_CLASSIFY_ENABLED = true;
     public static final String KEY_PRIORITY_ENABLED = "priority_enabled";
     public static final boolean DEFAULT_PRIORITY_ENABLED = true;
+    public static final String KEY_PROMOTION_FILTER = "promotion_filter";
+    public static final boolean DEFAULT_PROMOTION_FILTER = false;
+    static final String ACTION_PROMOTION_SETTINGS = "com.localai.notif.PROMOTION_SETTINGS";
     public static final String KEY_REDUCE_ENABLED = "reduce_interruptions_enabled";
     public static final boolean DEFAULT_REDUCE_ENABLED = false;
     public static final String KEY_REDUCE_LOCK_SCREEN_ONLY = "reduce_lock_screen_only";
@@ -49,6 +52,11 @@ public final class Config {
     public static final boolean DEFAULT_ALWAYS_LOAD_MODEL = false;
     public static final String KEY_SHOW_IN_SYSTEM_SETTINGS = "show_in_system_settings";
     public static final boolean DEFAULT_SHOW_IN_SYSTEM_SETTINGS = false;
+    public static final String KEY_GLOW_STYLE = "glow_style";
+    public static final String GLOW_STYLE_XIAOAI = "xiaoai";
+    public static final String GLOW_STYLE_NEBULA = "nebula";
+    public static final String DEFAULT_GLOW_STYLE = GLOW_STYLE_XIAOAI;
+    public static final String ACTION_GLOW_STYLE_CHANGED = "com.localai.notif.GLOW_STYLE_CHANGED";
     public static final String EXTRA_FROM_SYSTEM_SETTINGS = "localai_from_system_settings";
     public static final String LAUNCHER_ALIAS_CLASS = "com.localai.notif.MainActivityLauncher";
     static final int MODULE_VERSION_CODE = 22;
@@ -66,6 +74,14 @@ public final class Config {
     static final String ACTION_ENGINE_STATE_CHANGED = "com.localai.notif.ENGINE_STATE_CHANGED";
 
     public static final int DEFAULT_MIN_LENGTH = 15;
+
+    static String sanitizeGlowStyle(String raw) {
+        return GLOW_STYLE_NEBULA.equals(raw) ? GLOW_STYLE_NEBULA : GLOW_STYLE_XIAOAI;
+    }
+
+    static boolean isXiaoAiGlow(String raw) {
+        return !GLOW_STYLE_NEBULA.equals(raw);
+    }
 
     private Config() {}
 }
