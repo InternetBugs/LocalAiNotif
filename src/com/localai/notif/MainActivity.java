@@ -39,6 +39,7 @@ public final class MainActivity extends Activity implements ModelDownloadManager
     private HyperSettingsUi.PriorityPreviewView mPriorityPreview;
     private HyperSettingsUi.ReducePreviewView mReducePreview;
     private HyperSettingsUi.SwitchRowParts mSummaryRow;
+    private HyperSettingsUi.SwitchRowParts mRecapRow;
     private HyperSettingsUi.NavRowParts mSummaryAdvancedRow;
     private HyperSettingsUi.SwitchRowParts mPriorityRow;
     private HyperSettingsUi.SwitchRowParts mPromotionRow;
@@ -124,7 +125,9 @@ public final class MainActivity extends Activity implements ModelDownloadManager
         GlowStyle.setCurrent(mGlowStyle);
 
         setContentView(buildContentView(
-                initialPriority, initialSummary, initialReduce, initialReduceLockOnly,
+                initialPriority, initialSummary,
+                savedInstanceState != null && savedInstanceState.getBoolean(Config.KEY_NOTIFICATION_RECAP),
+                initialReduce, initialReduceLockOnly,
                 savedInstanceState != null && savedInstanceState.getBoolean(Config.KEY_REDUCE_FILTER_ICONS),
                 savedInstanceState != null && savedInstanceState.getBoolean(Config.KEY_REDUCE_NORMAL_SOUNDS),
                 initialAlwaysLoad, initialPromotion));
@@ -212,6 +215,7 @@ public final class MainActivity extends Activity implements ModelDownloadManager
         if (mSummaryRow != null) {
             outState.putBoolean(STATE_GROUP_SUMMARY, mSummaryRow.toggle.isChecked());
         }
+        outState.putBoolean(Config.KEY_NOTIFICATION_RECAP, mRecapRow.toggle.isChecked());
         if (mReduceRow != null) {
             outState.putBoolean(STATE_REDUCE_ENABLED, mReduceRow.toggle.isChecked());
         }
@@ -238,6 +242,7 @@ public final class MainActivity extends Activity implements ModelDownloadManager
     private View buildContentView(
             boolean initialPriority,
             boolean initialSummary,
+            boolean initialRecap,
             boolean initialReduce,
             boolean initialReduceLockOnly,
             boolean initialReduceFilterIcons,
@@ -290,10 +295,21 @@ public final class MainActivity extends Activity implements ModelDownloadManager
                 null,
                 false,
                 false,
-                true);
+                false);
         mSummaryAdvancedRow.row.setOnClickListener(v ->
                 startActivity(new Intent(this, SummarySettingsActivity.class)));
         summaryCard.addView(mSummaryAdvancedRow.row);
+        summaryCard.addView(HyperSettingsUi.createInsetDivider(this, mPalette));
+        mRecapRow = HyperSettingsUi.createSwitchRow(this, mPalette, NotificationRecap.LABEL,
+                "自动概括单条较长的通知，展开该条通知可读原文。",
+                initialRecap, false, true);
+        mRecapRow.row.setOnClickListener(view -> {
+            boolean target = !mRecapRow.toggle.isChecked();
+            view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+            mRecapRow.toggle.setChecked(target, true);
+            saveSwitchOption(Config.KEY_NOTIFICATION_RECAP, target, mRecapRow);
+        });
+        summaryCard.addView(mRecapRow.row);
         content.addView(summaryCard);
 
         // 2. Section: 重要通知 (preview + toggle unified inside one 18dp squircle card)
@@ -864,6 +880,10 @@ public final class MainActivity extends Activity implements ModelDownloadManager
         if (mPromotionRow != null && mPromotionRow.row.isClickable()) {
             boolean enabled = config.getBoolean(Config.KEY_PROMOTION_FILTER, Config.DEFAULT_PROMOTION_FILTER);
             setPromotionVisual(enabled, animate);
+        }
+        if (mRecapRow != null && mRecapRow.row.isClickable()) {
+            mRecapRow.toggle.setChecked(config.getBoolean(
+                    Config.KEY_NOTIFICATION_RECAP, Config.DEFAULT_NOTIFICATION_RECAP), animate);
         }
         boolean priority = config.getBoolean(Config.KEY_PRIORITY_ENABLED, Config.DEFAULT_PRIORITY_ENABLED);
         boolean summary = config.getBoolean(Config.KEY_GROUP_SUMMARY, Config.DEFAULT_GROUP_SUMMARY);

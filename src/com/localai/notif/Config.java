@@ -40,6 +40,8 @@ public final class Config {
     public static final String KEY_GROUP_SUMMARY = "group_summary";
     public static final boolean DEFAULT_GROUP_SUMMARY = true;
     static final String KEY_INCLUDE_ITEM_SUMMARIES = "include_item_summaries";
+    static final String KEY_NOTIFICATION_RECAP = "notification_recap";
+    static final boolean DEFAULT_NOTIFICATION_RECAP = false;
 
     public static final String KEY_DOWNLOAD_SOURCE = "download_source";
     public static final String DOWNLOAD_SOURCE_MODELSCOPE = "modelscope";

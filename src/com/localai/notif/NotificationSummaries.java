@@ -62,6 +62,10 @@ final class NotificationSummaries {
     private final Map<String, PriorityDecision> priorityDecisions = new HashMap<>();
     private final Set<String> classificationInFlight = new HashSet<>();
     private final Map<String, Long> promotionAttempts = new HashMap<>();
+    private final Map<String, Object> recapAttempts = new HashMap<>();
+    private String recapModelPath;
+    private long recapGeneration;
+    private boolean recapInFlight;
     private boolean promotionEnabled;
     private boolean modelReady;
     private final SummaryScheduler scheduler;
@@ -415,6 +419,7 @@ final class NotificationSummaries {
         } finally {
             submitPending(pending);
         }
+        reconcileRecaps(snapshot, settings, revision);
         for (Entry entry : snapshot) {
             String key = entry.sbn.getKey();
             activeKeys.add(key);
@@ -447,7 +452,7 @@ final class NotificationSummaries {
                 List<Entry> children = group.getValue();
                 Entry summary = summaries.get(group.getKey());
                 boolean priorityGroup = summary != null && summary.prioritySummary;
-                boolean eligible = enabled && summary != null && children.size() >= 2
+                boolean eligible = enabled && modelReady && summary != null && children.size() >= 2
                         && !awaitingGroups.contains(group.getKey());
                 int total = 0;
                 for (Entry child : children) {
@@ -538,6 +543,88 @@ final class NotificationSummaries {
             cachedGroups.keySet().retainAll(liveGroups);
             attempted.keySet().retainAll(liveBatches);
             return listRevision.get() == revision ? batches : List.of();
+    }
+
+    private void reconcileRecaps(List<Entry> snapshot, Bundle settings, long revision)
+            throws ReflectiveOperationException {
+        String modelPath = settings.getBoolean(Config.KEY_NOTIFICATION_RECAP, Config.DEFAULT_NOTIFICATION_RECAP)
+                && modelReady ? settings.getString(Config.KEY_MODEL_PATH, Config.DEFAULT_MODEL_PATH) : null;
+        Entry next = null;
+        String nextBody = "";
+        synchronized (lock) {
+            if (listRevision.get() != revision) return;
+            boolean resetRecaps = !java.util.Objects.equals(modelPath, recapModelPath);
+            if (resetRecaps) {
+                recapModelPath = modelPath;
+                recapGeneration++;
+                recapAttempts.clear();
+            }
+            recapAttempts.keySet().retainAll(recordsByKey.keySet());
+            for (Entry entry : snapshot) {
+                String key = entry.sbn.getKey();
+                if (recordsByKey.get(key) != entry.record) continue;
+                Notification notification = entry.sbn.getNotification();
+                boolean eligible = modelPath != null && entry.eligible && !(promotionEnabled && entry.promotion);
+                if (!eligible) recapAttempts.remove(key);
+                if ((!eligible || resetRecaps) && notification.extras != null
+                        && notification.extras.containsKey(NotificationRecap.EXTRA)) {
+                    notification.extras.remove(NotificationRecap.EXTRA);
+                    PriorityNotification.notifyUpdated(listeners, notifyPosted, entry.record, entry.sbn);
+                }
+                if (!eligible || recapInFlight || !entry.visible || recapAttempts.get(key) == entry.record
+                        || (next != null && next.sbn.getPostTime() > entry.sbn.getPostTime())) continue;
+                String body = NotificationRecap.body(notification);
+                if (NotificationRecap.isLong(body)) {
+                    next = entry;
+                    nextBody = body;
+                }
+            }
+        }
+        if (next == null) return;
+        Entry requested = next;
+        String body = nextBody;
+        long generation = recapGeneration;
+        recapInFlight = true;
+        recapAttempts.put(requested.sbn.getKey(), requested.record);
+        executor.execute(() -> {
+            Bundle input = new Bundle();
+            input.putString(NotificationRecap.TITLE, LlmEngine.clip(requested.title, 120));
+            input.putString(NotificationRecap.BODY, LlmEngine.clip(body, NotificationRecap.MAX_INPUT_LENGTH));
+            Bundle reply = ModuleMain.callProvider(context, NotificationRecap.METHOD, input);
+            String recap = reply != null && "0".equals(reply.getString("status"))
+                    ? reply.getString(NotificationRecap.EXTRA, "") : "";
+            handler.post(() -> finishRecap(requested, body, generation, recap));
+        });
+    }
+
+    private void finishRecap(Entry requested, String body, long generation, String recap) {
+        recapInFlight = false;
+        try {
+            if (recap.isBlank() || generation != recapGeneration || !settings().getBoolean(
+                    Config.KEY_NOTIFICATION_RECAP, Config.DEFAULT_NOTIFICATION_RECAP)
+                    || !settings().getBoolean(Config.KEY_MODEL_READY)
+                    || !java.util.Objects.equals(recapModelPath, settings().getString(
+                            Config.KEY_MODEL_PATH, Config.DEFAULT_MODEL_PATH))) return;
+            synchronized (lock) {
+                String key = requested.sbn.getKey();
+                if (recordsByKey.get(key) != requested.record) return;
+                StatusBarNotification sbn = (StatusBarNotification) getSbn.invoke(requested.record);
+                Notification notification = sbn.getNotification();
+                if (!body.equals(NotificationRecap.body(notification))
+                        || !requested.title.equals(GroupSummaryData.title(notification))) {
+                    recapAttempts.remove(key, requested.record);
+                    return;
+                }
+                if (!PriorityNotification.isEligible(notification)
+                        || (promotionEnabled && PromotionNotification.isMarked(sbn))) return;
+                notification.extras.putString(NotificationRecap.EXTRA, recap);
+                PriorityNotification.notifyUpdated(listeners, notifyPosted, requested.record, sbn);
+            }
+        } catch (Exception exception) {
+            Log.w(TAG, "Failed to apply notification recap", exception);
+        } finally {
+            scheduler.refresh();
+        }
     }
 
     private boolean isCurrentSummary(Entry summary, long revision) {
@@ -827,6 +914,7 @@ final class NotificationSummaries {
                 input.putString("package", packageName);
                 input.putString("appLabel", appLabel(packageName));
                 input.putInt("totalCount", batch.children.size());
+                input.putInt("distinctTitles", countDistinctTitles(batch.children));
                 input.putBoolean(Config.KEY_INCLUDE_ITEM_SUMMARIES, false);
                 Log.i(TAG, "Requesting group summary: " + batch.requested.size() + " notification(s)");
                 reply = ModuleMain.callProvider(context, "summarize_group", input);
@@ -837,6 +925,16 @@ final class NotificationSummaries {
         Bundle result = reply;
         boolean skippedSummary = skipGroupSummaryForNewVip;
         handler.post(() -> finish(batch, result, skippedSummary));
+    }
+
+    private static int countDistinctTitles(List<Entry> children) {
+        if (children == null || children.isEmpty()) return 0;
+        Set<String> seen = new HashSet<>();
+        for (Entry child : children) {
+            String title = child.title == null ? "" : child.title.trim().toLowerCase(java.util.Locale.ROOT);
+            if (!title.isEmpty()) seen.add(title);
+        }
+        return seen.size();
     }
 
     /** User-visible app name for summary prompts; empty on failure so the provider falls back. */

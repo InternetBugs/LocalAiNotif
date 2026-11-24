@@ -22,8 +22,6 @@ import android.service.notification.StatusBarNotification;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.TextUtils;
-import android.text.style.ForegroundColorSpan;
-import android.text.style.LeadingMarginSpan;
 import android.text.style.ReplacementSpan;
 import android.util.Log;
 import android.util.TypedValue;
@@ -83,7 +81,7 @@ import static com.localai.notif.SystemUiPrioritySection.requireMethod;
  */
 final class SystemUiGroupText {
     private static final String TAG = "LocalAiNotif";
-    static final int MAX_ADAPTIVE_LINES = 7;
+    static final int MAX_ADAPTIVE_LINES = 4;
     private static final Pattern GROUP_PREFIX_PATTERN =
             Pattern.compile("^.+?\\s+\\d+\\s*条(?:新)?通知\\s*[:：]\\s*");
     private static final int MAX_REVEALED_CACHE = 64;
@@ -887,8 +885,7 @@ final class SystemUiGroupText {
             state.view.setGlowStyle(xiaoAi);
             String displayText = formatForDisplay(summaryText, isMiuiStyle());
             state.view.setText(state.view.buildSummarySpannable(displayText));
-            state.view.setContentDescription(
-                    NebulaSummaryVisuals.LABEL + "：" + summaryText.replace('\n', '；'));
+            state.view.setContentDescription(NebulaSummaryVisuals.LABEL + "：" + displayText);
             layoutSpecChanged = true;
         }
         if (layoutSpecChanged) {
@@ -899,9 +896,21 @@ final class SystemUiGroupText {
     static String formatForDisplay(String summaryText, boolean miuiStyle) {
         if (summaryText == null) return "";
         String trimmed = summaryText.trim();
-        if (!miuiStyle) return trimmed;
+        if (trimmed.isEmpty()) return "";
         String stripped = GROUP_PREFIX_PATTERN.matcher(trimmed).replaceFirst("").trim();
-        return stripped.isEmpty() ? trimmed : stripped;
+        String base = stripped.isEmpty() ? trimmed : stripped;
+        if (base.indexOf('\n') < 0 && base.indexOf('\r') < 0) {
+            return base;
+        }
+        String[] rawLines = base.split("\\r?\\n");
+        ArrayList<String> parts = new ArrayList<>(rawLines.length);
+        for (String raw : rawLines) {
+            String line = raw.trim();
+            if (!line.isEmpty()) parts.add(line);
+        }
+        if (parts.isEmpty()) return base;
+        boolean cjk = GroupSummaryData.isCjkPrimary(base);
+        return String.join(cjk ? "；" : " ", parts);
     }
 
     static int computeAdaptiveCardHeight(int textHeight, int topPad, int bottomPad, int minCardHeight) {
@@ -1467,33 +1476,11 @@ final class SystemUiGroupText {
         }
 
         CharSequence buildSummarySpannable(String summaryText) {
-            String[] lines = summaryText.split("\n");
+            badgeSpan.setShowHairline(true);
             SpannableStringBuilder ssb = new SpannableStringBuilder();
-            if (lines.length <= 1) {
-                badgeSpan.setShowHairline(true);
-                ssb.append('\uFFFC');
-                ssb.append(summaryText);
-                ssb.setSpan(badgeSpan, 0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-                return ssb;
-            }
-            badgeSpan.setShowHairline(false);
             ssb.append('\uFFFC');
+            ssb.append(summaryText);
             ssb.setSpan(badgeSpan, 0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-            int bulletIndent = Math.round(11f * density);
-            int bulletIndex = 0;
-            for (String rawLine : lines) {
-                String line = rawLine.trim();
-                if (line.isEmpty()) continue;
-                int dotColor = NebulaSummaryVisuals.bulletDotColor(darkSurface, xiaoAiStyle, bulletIndex++);
-                ssb.append('\n');
-                int lineStart = ssb.length();
-                ssb.append("• ");
-                ssb.setSpan(new ForegroundColorSpan(dotColor), lineStart, lineStart + 1,
-                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-                ssb.append(line);
-                ssb.setSpan(new LeadingMarginSpan.Standard(0, bulletIndent), lineStart, ssb.length(),
-                        Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-            }
             return ssb;
         }
 

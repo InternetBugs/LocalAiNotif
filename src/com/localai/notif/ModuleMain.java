@@ -37,6 +37,7 @@ public final class ModuleMain extends XposedModule {
             hookMiuiNotification(param.getDefaultClassLoader());
         } else if ("com.android.systemui".equals(pkg)) {
             SystemUiGroupText.install(this, param.getDefaultClassLoader());
+            SystemUiNotificationRecap.install(this, param.getDefaultClassLoader());
             SystemUiPrioritySection.install(this, param.getDefaultClassLoader());
             SystemUiPromotions.install(this, param.getDefaultClassLoader());
             SystemUiReduceInterruptions.install(this, param.getDefaultClassLoader());
