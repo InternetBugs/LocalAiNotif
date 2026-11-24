@@ -1045,11 +1045,11 @@ public final class ModelDownloadActivity extends Activity implements ModelDownlo
             } else if (mEngineLoaded) {
                 engineNote = mAlwaysLoadModel
                         ? "推理引擎已常驻内存就绪"
-                        : "推理引擎已按需加载（空闲 60 秒自动释放）";
+                        : "推理引擎已按需加载（空闲 3 分钟自动释放）";
             } else {
                 engineNote = mAlwaysLoadModel
                         ? "已开启始终加载，等待引擎常驻就绪"
-                        : "文件已就绪，收到通知时按需加载并在空闲 60 秒后释放";
+                        : "文件已就绪，收到通知时按需加载并在空闲 3 分钟后释放";
             }
             String prefix = matched != null ? "" : "检测到自定义本地模型，";
             mStatusDesc.setText(prefix + engineNote + "，占用 " + ModelCatalog.formatBytes(sizeBytes) + "。");

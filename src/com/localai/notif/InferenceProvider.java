@@ -58,7 +58,7 @@ public final class InferenceProvider extends ContentProvider {
     private static final String SYSTEM_PROMPT =
             "你是安卓手机的通知摘要引擎,只输出摘要文本本身,不要任何前缀、引号或解释。";
     private static final String NO_THINK = "\n/no_think";
-    static final long IDLE_UNLOAD_DELAY_MS = 60_000L;
+    static final long IDLE_UNLOAD_DELAY_MS = 180_000L;
 
     private static volatile InferenceProvider sInstance;
 
@@ -809,7 +809,8 @@ public final class InferenceProvider extends ContentProvider {
             synchronized (mLoadLock) {
                 closeQuietly(closing);
             }
-            Log.i(TAG, "Idle timeout (60s) reached; unloaded MNN engine");
+            Log.i(TAG, "Idle timeout (" + TimeUnit.MILLISECONDS.toSeconds(IDLE_UNLOAD_DELAY_MS)
+                    + "s) reached; unloaded MNN engine");
             notifyEngineStateChanged();
         });
     }

@@ -381,7 +381,7 @@ public final class MainActivity extends Activity implements ModelDownloadManager
                 this,
                 mPalette,
                 "始终加载 AI 模型",
-                "关闭时按需加载，空闲 60 秒无推理后自动释放内存。",
+                "关闭时按需加载，空闲 3 分钟无推理后自动释放内存。",
                 initialAlwaysLoad,
                 false,
                 true);
@@ -726,11 +726,11 @@ public final class MainActivity extends Activity implements ModelDownloadManager
             }
         } else {
             if (engineLoading) {
-                subtitle = "按需加载中，空闲 60 秒无推理后自动释放内存。";
+                subtitle = "按需加载中，空闲 3 分钟无推理后自动释放内存。";
             } else if (engineLoaded) {
-                subtitle = "当前已按需加载，空闲 60 秒无推理后自动释放内存。";
+                subtitle = "当前已按需加载，空闲 3 分钟无推理后自动释放内存。";
             } else {
-                subtitle = "关闭时按需加载，空闲 60 秒无推理后自动释放内存。";
+                subtitle = "关闭时按需加载，空闲 3 分钟无推理后自动释放内存。";
             }
         }
         mAlwaysLoadRow.summary.setText(subtitle);
