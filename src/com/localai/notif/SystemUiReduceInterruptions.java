@@ -1,6 +1,6 @@
 package com.localai.notif;
-
 import android.app.KeyguardManager;
+import android.app.Notification;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -57,8 +57,18 @@ final class SystemUiReduceInterruptions {
     private final Set<Object> quietTiles = Collections.newSetFromMap(new WeakHashMap<>());
     private final Set<View> zenIconViews = Collections.newSetFromMap(new WeakHashMap<>());
     private final Set<ModeIndicator> modeIndicators = Collections.newSetFromMap(new WeakHashMap<>());
+    private final Map<View, ZenSlot> zenSlots = new WeakHashMap<>();
+    private KeyguardZenRow keyguardZenRow;
+    private HyperMusicCoverDate hyperMusicCoverDate;
     private final Map<String, Long> alertedBreakthroughSeqs = new ConcurrentHashMap<>();
     private final Map<String, Long> soundWakeSeqByKey = new ConcurrentHashMap<>();
+    private static volatile SystemUiReduceInterruptions sInstance;
+
+    /** True after the user swipes up on the lockscreen to reveal reduce-muted notifications
+     *  for the current lock session; reset on fresh lock, screen off, or mode toggling. */
+    private volatile boolean lockRevealed;
+    /** Count of notifications hidden by the lockscreen quiet filter in the latest render pass. */
+    private volatile int lockQuietCount;
 
     private volatile Context appContext;
     private volatile boolean reduceActive;
@@ -95,6 +105,7 @@ final class SystemUiReduceInterruptions {
     }
 
     private SystemUiReduceInterruptions(ModuleMain module, ClassLoader loader) {
+        sInstance = this;
         try {
             notificationIcons = new SystemUiNotificationIcons(module, loader, this::ensureInitialized);
         } catch (Throwable error) {
@@ -103,6 +114,17 @@ final class SystemUiReduceInterruptions {
         hookQuietModeTile(module, loader);
         hookStatusBarZenIcon(module, loader);
         hookPhoneStatusBar(module, loader);
+        hookKeyguardStatusBar(module, loader);
+        try {
+            keyguardZenRow = new KeyguardZenRow(module, loader);
+        } catch (Throwable error) {
+            module.log(Log.WARN, TAG, "Could not hook keyguard notification-count DND row", error);
+        }
+        try {
+            hyperMusicCoverDate = new HyperMusicCoverDate(module);
+        } catch (ReflectiveOperationException | RuntimeException error) {
+            module.log(Log.WARN, TAG, "Could not observe the optional lockscreen date extension", error);
+        }
         hookVisualInterruptionAndAlerts(module, loader);
         SystemUiVolumeReduce.install(module, loader, this::ensureInitialized);
     }
@@ -183,15 +205,16 @@ final class SystemUiReduceInterruptions {
             Field right = ModuleMain.findField(phone, "mStatusBarStatusIcons");
             Field ignored = ModuleMain.findField(container, "ignoredSlots");
             Method inflate = ModuleMain.findMethod(phone, "onFinishInflate");
-            Method setIgnored = ModuleMain.findMethod(container, "setIgnoredSlots", List.class);
-            if (left == null || right == null || ignored == null || inflate == null || setIgnored == null) return;
-            module.hook(setIgnored).intercept(chain -> {
+            Method addIgnored = ModuleMain.findMethod(container, "addIgnoredSlots", List.class);
+            if (left == null || right == null || ignored == null || inflate == null || addIgnored == null) return;
+            // setIgnoredSlots clears the list, then calls addIgnoredSlots even for an empty list.
+            module.hook(addIgnored).intercept(chain -> {
                 Object result = chain.proceed();
-                for (ModeIndicator icon : modeIndicators) {
-                    if (icon.right == chain.getThisObject()) {
-                        icon.ownsZenSlot = false;
-                        icon.update(showModeIconOnLeft());
-                    }
+                View group = (View) chain.getThisObject();
+                ZenSlot slot = zenSlots.get(group);
+                if (slot != null) {
+                    if (((List<?>) chain.getArg(0)).contains("zen")) slot.ownsZen = false;
+                    slot.update(group, slot.keyguard ? reduceActive : showModeIconOnLeft());
                 }
                 return result;
             });
@@ -203,14 +226,17 @@ final class SystemUiReduceInterruptions {
                 if (!(group.findViewById(clockId) instanceof TextView clock) || clock.getParent() != group) return result;
                 @SuppressWarnings("unchecked")
                 List<String> ignoredSlots = (List<String>) ignored.get(slots);
-                ModeIndicator icon = new ModeIndicator(clock, slots, ignoredSlots);
+                ZenSlot slot = new ZenSlot(ignoredSlots, false);
+                zenSlots.put(slots, slot);
+                slot.update(slots, showModeIconOnLeft());
+                ModeIndicator icon = new ModeIndicator(clock);
                 int size = icon.getDrawable().getIntrinsicWidth();
                 LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(size, size);
                 params.gravity = Gravity.CENTER_VERTICAL;
                 params.setMarginEnd(Math.round(2 * bar.getResources().getDisplayMetrics().density));
                 group.addView(icon, group.indexOfChild(clock) + 1, params);
                 modeIndicators.add(icon);
-                icon.update(showModeIconOnLeft());
+                icon.setVisibility(showModeIconOnLeft() ? View.VISIBLE : View.GONE);
                 ensureInitialized(bar.getContext());
                 return result;
             });
@@ -219,35 +245,74 @@ final class SystemUiReduceInterruptions {
         }
     }
 
+    private void hookKeyguardStatusBar(ModuleMain module, ClassLoader loader) {
+        try {
+            Class<?> barClass = loader.loadClass("com.android.systemui.statusbar.phone.MiuiKeyguardStatusBarView");
+            Field icons = ModuleMain.findField(barClass, "mStatusIconContainer");
+            if (icons == null) return;
+            Field ignored = ModuleMain.findField(icons.getType(), "ignoredSlots");
+            Method inflate = ModuleMain.findMethod(barClass, "onFinishInflate");
+            if (ignored == null || inflate == null) return;
+            module.hook(inflate).intercept(chain -> {
+                Object result = chain.proceed();
+                if (icons.get(chain.getThisObject()) instanceof View group) {
+                    @SuppressWarnings("unchecked")
+                    List<String> ignoredSlots = (List<String>) ignored.get(group);
+                    ZenSlot slot = new ZenSlot(ignoredSlots, true);
+                    zenSlots.put(group, slot);
+                    slot.update(group, reduceActive);
+                    ensureInitialized(group.getContext());
+                }
+                return result;
+            });
+        } catch (Throwable error) {
+            module.log(Log.WARN, TAG, "Could not attach keyguard zen status icon", error);
+        }
+    }
+
+    private static final class ZenSlot {
+        final List<String> ignoredSlots;
+        final boolean keyguard;
+        boolean ownsZen;
+
+        ZenSlot(List<String> ignoredSlots, boolean keyguard) {
+            this.ignoredSlots = ignoredSlots;
+            this.keyguard = keyguard;
+        }
+
+        void update(View group, boolean hide) {
+            if (hide && !ignoredSlots.contains("zen")) {
+                ignoredSlots.add("zen");
+                ownsZen = true;
+                group.requestLayout();
+            } else if (!hide && ownsZen) {
+                ignoredSlots.remove("zen");
+                ownsZen = false;
+                group.requestLayout();
+            }
+        }
+    }
+
+    private void updateStatusIndicators() {
+        boolean left = showModeIconOnLeft();
+        for (ModeIndicator icon : modeIndicators) icon.setVisibility(left ? View.VISIBLE : View.GONE);
+        for (Map.Entry<View, ZenSlot> entry : zenSlots.entrySet()) {
+            ZenSlot slot = entry.getValue();
+            slot.update(entry.getKey(), slot.keyguard ? reduceActive : left);
+        }
+    }
+
     private static final class ModeIndicator extends ImageView implements ViewTreeObserver.OnPreDrawListener {
         final TextView clock;
-        final View right;
-        final List<String> ignoredSlots;
-        boolean ownsZenSlot;
         int tint;
 
-        ModeIndicator(TextView clock, View right, List<String> ignoredSlots) {
+        ModeIndicator(TextView clock) {
             super(clock.getContext());
             this.clock = clock;
-            this.right = right;
-            this.ignoredSlots = ignoredSlots;
             setContentDescription("减少干扰");
             setImageDrawable(ReduceInterruptions.createStatusBarDrawable(getContext()));
             tint = clock.getCurrentTextColor();
             getDrawable().setTint(tint);
-        }
-
-        void update(boolean active) {
-            setVisibility(active ? VISIBLE : GONE);
-            if (active && !ignoredSlots.contains("zen")) {
-                ignoredSlots.add("zen");
-                ownsZenSlot = true;
-                right.requestLayout();
-            } else if (!active && ownsZenSlot) {
-                ignoredSlots.remove("zen");
-                ownsZenSlot = false;
-                right.requestLayout();
-            }
         }
 
         @Override protected void onAttachedToWindow() {
@@ -539,6 +604,19 @@ final class SystemUiReduceInterruptions {
             }
             onKeyguardChanged(keyguard.isKeyguardLocked());
         });
+        try {
+            // Screen off ends the reveal session: notifications hide again on the next lockscreen.
+            app.registerReceiver(new BroadcastReceiver() {
+                @Override public void onReceive(Context context, Intent intent) {
+                    if (reduceActive && lockRevealed) {
+                        lockRevealed = false;
+                        SystemUiPrioritySection.requestListInvalidation();
+                    }
+                }
+            }, new IntentFilter(Intent.ACTION_SCREEN_OFF), null, mainHandler, Context.RECEIVER_NOT_EXPORTED);
+        } catch (Throwable t) {
+            Log.w(TAG, "Failed to register screen-off reveal reset", t);
+        }
 
         try {
             IntentFilter stateActions = new IntentFilter(ReduceInterruptions.ACTION_STATE_CHANGED);
@@ -576,6 +654,11 @@ final class SystemUiReduceInterruptions {
                         SystemUiReduceIsland.onReduceChanged(active);
                     }
                     if (changed) {
+                        if (keyguardZenRow != null) keyguardZenRow.setReduceActive(reduceActive);
+                        lockRevealed = false;
+                        if (keyguardShowing) {
+                            SystemUiPrioritySection.requestListInvalidation();
+                        }
                         refreshUiAfterStateChange();
                     }
                 }
@@ -601,6 +684,8 @@ final class SystemUiReduceInterruptions {
                         filterIcons = cfg.getBoolean(Config.KEY_REDUCE_FILTER_ICONS, Config.DEFAULT_REDUCE_FILTER_ICONS);
                         lockScreenOnly = cfgLockOnly;
                         SystemUiVolumeReduce.applyReduceState(reduceActive, 0L, false);
+                        if (reduceActive && keyguardShowing) SystemUiPrioritySection.requestListInvalidation();
+                        if (keyguardZenRow != null) keyguardZenRow.setReduceActive(reduceActive);
                         refreshUiAfterStateChange();
                     });
                 }
@@ -627,14 +712,22 @@ final class SystemUiReduceInterruptions {
     }
 
     private void onKeyguardChanged(boolean showing) {
-        if (keyguardShowing == showing) return;
+        boolean was = keyguardShowing;
+        if (was == showing) return;
         keyguardShowing = showing;
-        for (ModeIndicator icon : modeIndicators) icon.update(showModeIconOnLeft());
+        updateStatusIndicators();
+        if (hyperMusicCoverDate != null) hyperMusicCoverDate.refresh();
+        if (reduceActive) {
+            // Fresh lock session: reduce-muted notifications hidden again until the next swipe-up.
+            lockRevealed = false;
+            SystemUiPrioritySection.requestListInvalidation();
+        }
     }
 
     private void refreshUiAfterStateChange() {
         mainHandler.post(() -> {
-            for (ModeIndicator icon : modeIndicators) icon.update(showModeIconOnLeft());
+            updateStatusIndicators();
+            if (hyperMusicCoverDate != null) hyperMusicCoverDate.refresh();
             ArrayList<Object> tilesCopy;
             synchronized (quietTiles) {
                 tilesCopy = new ArrayList<>(quietTiles);
@@ -662,6 +755,76 @@ final class SystemUiReduceInterruptions {
                 }
             }
         });
+    }
+
+    // ---------------------------------------------------------------------------------
+    // Lockscreen quiet filter (M4 lock experience): while Reduce Interruptions is active on
+    // the keyguard, notifications that are not important stay out of the lockscreen render
+    // list until the user swipes up; SystemUiPrioritySection performs the actual filtering
+    // and pill-header injection, this class owns the state.
+    // ---------------------------------------------------------------------------------
+
+    /** True when the lockscreen quiet filter should drop non-important entries right now. */
+    static boolean lockQuietHiddenActive() {
+        SystemUiReduceInterruptions self = sInstance;
+        return self != null && self.reduceActive && self.keyguardShowing && !self.lockRevealed;
+    }
+
+    /** True when the "减少干扰" pill line should sit below the clock (mode shown on keyguard). */
+    static boolean lockPillShowing() {
+        SystemUiReduceInterruptions self = sInstance;
+        return self != null && self.reduceActive && self.keyguardShowing;
+    }
+
+    static boolean lockPillRevealed() {
+        SystemUiReduceInterruptions self = sInstance;
+        return self != null && self.lockRevealed;
+    }
+
+    /** Notifications hidden from the lockscreen by the latest quiet-filtered render pass. */
+    static int lockQuietCount() {
+        SystemUiReduceInterruptions self = sInstance;
+        return self == null ? 0 : self.lockQuietCount;
+    }
+
+    static void setLockQuietCount(int count) {
+        SystemUiReduceInterruptions self = sInstance;
+        if (self != null) self.lockQuietCount = count;
+    }
+
+    /** Swipe-up on keyguard: reveal the muted notifications for this lock session. */
+    static void requestLockReveal() {
+        SystemUiReduceInterruptions self = sInstance;
+        if (self == null || !self.reduceActive || !self.keyguardShowing || self.lockRevealed) return;
+        self.lockRevealed = true;
+        Log.i(TAG, "Lockscreen reveal: showing reduce-muted notifications");
+        SystemUiPrioritySection.requestListInvalidation();
+    }
+
+    /**
+     * Decides whether a notification must stay visible on the reduced-disturbance lockscreen:
+     * important-marked, AI VIP breakthrough, or categories the system DND itself would let
+     * through (call/alarm/reminder/event/navigation/media playback). Null-safe fail-open.
+     */
+    static boolean isLockScreenImportant(StatusBarNotification sbn) {
+        if (sbn == null) return true;
+        Notification notification = sbn.getNotification();
+        if (notification == null) return true;
+        if (PriorityNotification.isMarked(sbn) || ReduceInterruptions.isBreakthrough(sbn)) return true;
+        String category = notification.category;
+        if (Notification.CATEGORY_CALL.equals(category)
+                || Notification.CATEGORY_ALARM.equals(category)
+                || Notification.CATEGORY_REMINDER.equals(category)
+                || Notification.CATEGORY_EVENT.equals(category)
+                || Notification.CATEGORY_NAVIGATION.equals(category)
+                || Notification.CATEGORY_TRANSPORT.equals(category)) {
+            return true;
+        }
+        if (notification.extras != null) {
+            String template = notification.extras.getString(Notification.EXTRA_TEMPLATE);
+            if (template != null && template.contains("MediaStyle")) return true;
+        }
+        return false;
     }
 
     private void requestSystemMode(Context ctx, int mode) {

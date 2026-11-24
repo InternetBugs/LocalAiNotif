@@ -34,8 +34,16 @@ import java.util.WeakHashMap;
 import java.util.function.Consumer;
 
 final class SystemUiPrioritySection {
-    private static final String TAG = "LocalAiNotif";
     private static final String LABEL = "LocalAiNotif priority";
+    private static final String TAG = "LocalAiNotif";
+    private static final String REDUCE_LABEL = "LocalAiNotif reduce";
+    private static volatile SystemUiPrioritySection sInstance;
+
+    /** VisualStabilityCoordinator invalidate hook points for on-demand list refresh. */
+    private Object stabilityManager;
+    private Method stabilityInvalidate;
+    /** Reduce lockscreen pill header per rendered stack root. */
+    private final Map<Object, ReducePill> reducePills = new WeakHashMap<>();
     private static final String NOTIFICATION = "com.android.systemui.statusbar.notification.";
     private static final String COLLECTION = NOTIFICATION + "collection.";
     private static final String COORDINATOR = COLLECTION + "coordinator.";
@@ -89,6 +97,7 @@ final class SystemUiPrioritySection {
     }
 
     private SystemUiPrioritySection(ModuleMain module, ClassLoader loader) throws Exception {
+        sInstance = this;
         Class<?> builder = loader.loadClass(COLLECTION + "ShadeListBuilder");
         Class<?> pipelineEntry = loader.loadClass(COLLECTION + "PipelineEntry");
         Class<?> section = loader.loadClass(COLLECTION + "listbuilder.NotifSection");
@@ -169,14 +178,29 @@ final class SystemUiPrioritySection {
             return result;
         });
         module.hook(buildNodeSpec).intercept(chain -> {
-            Object root = chain.proceed();
+            Object nodeBuilder = chain.getThisObject();
+            List<?> entries = (List<?>) chain.getArg(1);
+            List<?> visible = entries;
             try {
-                List<?> entries = (List<?>) chain.getArg(1);
+                if (SystemUiReduceInterruptions.lockQuietHiddenActive()) {
+                    visible = filterReduceQuiet(entries);
+                } else {
+                    SystemUiReduceInterruptions.setLockQuietCount(0);
+                }
+            } catch (Exception e) {
+                module.log(Log.WARN, TAG, "Failed to apply lockscreen quiet filter", e);
+                visible = entries;
+                SystemUiReduceInterruptions.setLockQuietCount(0);
+            }
+            Object root = (visible == entries)
+                    ? chain.proceed() : chain.proceed(new Object[]{chain.getArg(0), visible});
+            try {
                 Map<String, Long> versions = new HashMap<>();
-                for (Object entry : entries) collectPresented(entry, versions);
+                for (Object visibleEntry : visible) collectPresented(visibleEntry, versions);
                 View stackRoot = (View) stackView.get(containerOwner.get(listContainer.get(nodeController.get(root))));
                 presentation.afterRender(stackRoot, versions);
-                addHeader(root, chain.getThisObject(), entries);
+                addHeader(root, nodeBuilder, visible);
+                addReducePill(root);
             } catch (Exception e) {
                 module.log(Log.WARN, TAG, "Failed to render priority section heading", e);
             }
@@ -210,6 +234,11 @@ final class SystemUiPrioritySection {
         } catch (ReflectiveOperationException e) {
             module.log(Log.WARN, TAG, "Failed to hook priority gesture handling", e);
         }
+        try {
+            new LockscreenRevealGesture(module, loader);
+        } catch (ReflectiveOperationException e) {
+            module.log(Log.WARN, TAG, "Failed to hook lockscreen reveal gesture", e);
+        }
     }
 
     private void collectPresented(Object entry, Map<String, Long> versions) throws IllegalAccessException {
@@ -229,6 +258,7 @@ final class SystemUiPrioritySection {
         Class<?> stability = loader.loadClass(COORDINATOR + "VisualStabilityCoordinator$2");
         Field previousState = requireField(pipelineEntry, "previousAttachState");
         Method invalidate = requireMethod(stability, "invalidateList", String.class);
+        stabilityInvalidate = invalidate;
         Method allChanges = requireMethod(stability, "isEveryChangeAllowed");
         Method dispatch = requireMethod(stack, "dispatchTouchEvent", MotionEvent.class);
         Method sectionChange = requireMethod(stability, "isSectionChangeAllowed", entryType);
@@ -243,7 +273,8 @@ final class SystemUiPrioritySection {
         };
         module.hook(dispatch).intercept(chain -> {
             View view = (View) chain.getThisObject();
-            int action = ((MotionEvent) chain.getArg(0)).getActionMasked();
+            MotionEvent event = (MotionEvent) chain.getArg(0);
+            int action = event.getActionMasked();
             if (action == MotionEvent.ACTION_DOWN && touchedStacks.add(view)) {
                 view.addOnAttachStateChangeListener(touchLifetime);
             }
@@ -258,7 +289,10 @@ final class SystemUiPrioritySection {
                 }
             }
         });
-        module.hook(allChanges).intercept(chain -> touchedStacks.isEmpty() && (boolean) chain.proceed());
+        module.hook(allChanges).intercept(chain -> {
+            stabilityManager = chain.getThisObject();
+            return touchedStacks.isEmpty() && (boolean) chain.proceed();
+        });
         for (Method change : List.of(sectionChange, childMove, groupMove, prune)) {
             module.hook(change).intercept(chain -> {
                 Object entry = chain.getArg(0);
@@ -287,6 +321,161 @@ final class SystemUiPrioritySection {
         } catch (ReflectiveOperationException e) {
             Log.w(TAG, "Failed to refresh priority order after touch", e);
         }
+    }
+
+    // ---------------------------------------------------------------------------------
+    // Reduce Interruptions lockscreen experience: hide non-important notifications from the
+    // keyguard render list until the user swipes up, and show a "减少干扰 + 星芒LOGO" line
+    // below the clock. State lives in SystemUiReduceInterruptions; only rendering happens here.
+    // ---------------------------------------------------------------------------------
+
+    /** Requests a list rebuild so freshly hidden/revealed lockscreen notifications apply. */
+    static void requestListInvalidation() {
+        SystemUiPrioritySection self = sInstance;
+        Object manager = self == null ? null : self.stabilityManager;
+        Method invalidate = self == null ? null : self.stabilityInvalidate;
+        if (manager == null || invalidate == null) return;
+        try {
+            invalidate.invoke(manager, REDUCE_LABEL);
+        } catch (Throwable t) {
+            Log.w(TAG, "Failed to refresh notification list after reduce state change", t);
+        }
+    }
+
+    /**
+     * Removes lockscreen-hidden entries from the render list and records how many
+     * notifications were hidden (group children counted individually).
+     */
+    private List<?> filterReduceQuiet(List<?> entries) throws IllegalAccessException {
+        List<Object> pruned = null;
+        int hidden = 0;
+        for (int index = 0; index < entries.size(); index++) {
+            Object entry = entries.get(index);
+            if (isReduceQuietHidden(entry)) {
+                hidden += quietNotificationCount(entry);
+                if (pruned == null) {
+                    pruned = new ArrayList<>(entries.size());
+                    pruned.addAll(entries.subList(0, index));
+                }
+                continue;
+            }
+            if (pruned != null) pruned.add(entry);
+        }
+        SystemUiReduceInterruptions.setLockQuietCount(hidden);
+        return pruned != null ? pruned : entries;
+    }
+
+    /** True when the entry (and, for groups/bundles, every member) is reduce-muted on keyguard. */
+    private boolean isReduceQuietHidden(Object entry) throws IllegalAccessException {
+        if (groupType.isInstance(entry)) {
+            if (!isReduceQuietHidden(groupSummary.get(entry))) return false;
+            for (Object child : (List<?>) groupChildren.get(entry)) {
+                if (!isReduceQuietHidden(child)) return false;
+            }
+            return true;
+        }
+        if (bundleChildren.getDeclaringClass().isInstance(entry)) {
+            for (Object child : (List<?>) bundleChildren.get(entry)) {
+                if (!isReduceQuietHidden(child)) return false;
+            }
+            return true;
+        }
+        if (entryType.isInstance(entry)) {
+            StatusBarNotification item = (StatusBarNotification) sbn.get(entry);
+            return !SystemUiReduceInterruptions.isLockScreenImportant(item);
+        }
+        return false; // Unknown entry types are never hidden (fail-open).
+    }
+
+    private int quietNotificationCount(Object entry) throws IllegalAccessException {
+        if (groupType.isInstance(entry)) {
+            int count = 0;
+            for (Object child : (List<?>) groupChildren.get(entry)) count += quietNotificationCount(child);
+            return count;
+        }
+        if (bundleChildren.getDeclaringClass().isInstance(entry)) {
+            int count = 0;
+            for (Object child : (List<?>) bundleChildren.get(entry)) count += quietNotificationCount(child);
+            return count;
+        }
+        return 1;
+    }
+
+    /** Injects the "减少干扰" pill header as the topmost row (directly below the clock). */
+    private void addReducePill(Object root) throws Exception {
+        if (!SystemUiReduceInterruptions.lockPillShowing()) return;
+        Object rootController = nodeController.get(root);
+        ReducePill pill = reducePills.get(rootController);
+        if (pill == null) {
+            pill = createReducePill(rootController);
+            reducePills.put(rootController, pill);
+        }
+        pill.view.setClickable(SystemUiReduceInterruptions.lockQuietHiddenActive()
+                && SystemUiReduceInterruptions.lockQuietCount() > 0);
+        @SuppressWarnings("unchecked")
+        List<Object> children = (List<Object>) nodeChildren.get(root);
+        children.add(0, newNode.newInstance(root, pill.controller));
+    }
+
+    private ReducePill createReducePill(Object rootController) throws Exception {
+        Context context = ((View) getView.invoke(rootController)).getContext();
+        int layout = context.getResources().getIdentifier(
+                "status_bar_notification_section_header", "layout", "com.android.systemui");
+        ViewGroup header = (ViewGroup) LayoutInflater.from(context).inflate(layout, null, false);
+        ViewGroup contents = (ViewGroup) headerContents.get(header);
+        header.setClipChildren(false);
+        header.setClipToPadding(false);
+        contents.setClipChildren(false);
+        contents.setClipToPadding(false);
+        contents.removeAllViews();
+
+        ReducePill pill = new ReducePill();
+        pill.view = new ReduceLockPillView(context);
+        FrameLayout row = new FrameLayout(context);
+        pill.view.setOnClickListener(view -> {
+            if (SystemUiReduceInterruptions.lockQuietCount() > 0) {
+                SystemUiReduceInterruptions.requestLockReveal();
+            }
+        });
+        row.addView(pill.view, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER_HORIZONTAL));
+        contents.addView(row, new ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        header.setLayoutParams(new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        header.setClickable(false);
+        header.setFocusable(false);
+        setHeaderVisible.invoke(header, true, false);
+        header.addOnLayoutChangeListener((view, left, top, right, bottom,
+                oldLeft, oldTop, oldRight, oldBottom) -> {
+            if (bottom - top == oldBottom - oldTop) return;
+            try {
+                notifyHeaderHeightChanged.invoke(view, REDUCE_LABEL, false);
+            } catch (ReflectiveOperationException e) {
+                Log.w(TAG, "Failed to update reduce pill height", e);
+            }
+        });
+
+        pill.controller = Proxy.newProxyInstance(nodeControllerType.getClassLoader(),
+                new Class<?>[]{nodeControllerType}, (proxy, method, args) -> switch (method.getName()) {
+                    case "getView" -> header;
+                    case "getNodeLabel", "toString" -> REDUCE_LABEL;
+                    case "getChildCount" -> 0;
+                    case "offerToKeepInParentForAnimation", "removeFromParentIfKeptForAnimation" -> false;
+                    case "onViewAdded" -> setContentVisible.invoke(header, true, false, null);
+                    case "hashCode" -> System.identityHashCode(proxy);
+                    case "equals" -> proxy == args[0];
+                    default -> null;
+                });
+        return pill;
+    }
+
+    /** Mutable holder for one stack's injected reduce pill header. */
+    private static final class ReducePill {
+        Object controller;
+        ReduceLockPillView view;
     }
 
     private void hookPromotion(ModuleMain module, ClassLoader loader) throws Exception {
@@ -745,17 +934,87 @@ final class SystemUiPrioritySection {
         }
     }
 
+    /**
+     * Lockscreen "减少干扰" line below the clock: Apple Intelligence ribbon LOGO + label,
+     * Static drawing (no animation, respects reduced-motion by design); translucent white
+     * ink with an anti-halo shadow matches keyguard clock contrast on any wallpaper.
+     */
+    static final class ReduceLockPillView extends View {
+        private final Path logoPath = new Path();
+        private final Paint logoPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final String label;
+        private final float logoSize;
+        private final float iconTextGap;
+        private final float padTop;
+        private final float padBottom;
+
+        ReduceLockPillView(Context context) {
+            super(context);
+            float density = context.getResources().getDisplayMetrics().density;
+            String language = context.getResources().getConfiguration().getLocales().get(0).getLanguage();
+            label = "zh".equals(language) ? "减少干扰" : "Reduce Interruptions";
+
+            logoSize = 15.5f * density;
+            iconTextGap = 5.5f * density;
+            padTop = 5f * density;
+            padBottom = 8f * density;
+
+            textPaint.setTypeface(Typeface.create(Typeface.DEFAULT, 500, false));
+            textPaint.setTextSize(TypedValue.applyDimension(
+                    TypedValue.COMPLEX_UNIT_SP, 14f, context.getResources().getDisplayMetrics()));
+            textPaint.setLetterSpacing(0.01f);
+            textPaint.setColor(0xF2FFFFFF);
+            textPaint.setShadowLayer(1.6f * density, 0f, 0.6f * density, 0x50000000);
+            logoPaint.setColor(textPaint.getColor());
+
+            setClickable(false);
+            setFocusable(false);
+            setContentDescription(label);
+        }
+
+        @Override
+        protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+            Paint.FontMetrics fm = textPaint.getFontMetrics();
+            float textH = fm.descent - fm.ascent;
+            float width = logoSize + iconTextGap + textPaint.measureText(label);
+            float height = getPaddingTop() + padTop + Math.max(logoSize, textH)
+                    + padBottom + getPaddingBottom();
+            setMeasuredDimension(
+                    resolveSize(Math.round(width) + getPaddingLeft() + getPaddingRight(), widthMeasureSpec),
+                    resolveSize(Math.round(height), heightMeasureSpec));
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            Paint.FontMetrics fm = textPaint.getFontMetrics();
+            float contentTop = getPaddingTop() + padTop;
+            float contentBottom = getHeight() - getPaddingBottom() - padBottom;
+            float centerY = (contentTop + contentBottom) * 0.5f;
+
+            float logoLeft = getPaddingLeft();
+            float logoTop = centerY - logoSize * 0.5f;
+            ReduceInterruptions.drawAppleIntelMono(canvas, logoLeft, logoTop, logoSize,
+                    logoPaint, 1.78f, logoPath);
+
+            float textX = logoLeft + logoSize + iconTextGap;
+            float baseline = centerY - (fm.ascent + fm.descent) * 0.5f;
+            canvas.drawText(label, textX, baseline, textPaint);
+        }
+    }
+
+
     private static int dp(Context context, int value) {
         return Math.round(value * context.getResources().getDisplayMetrics().density);
     }
 
-    private static Field requireField(Class<?> owner, String name) throws NoSuchFieldException {
+    static Field requireField(Class<?> owner, String name) throws NoSuchFieldException {
         Field field = ModuleMain.findField(owner, name);
         if (field == null) throw new NoSuchFieldException(owner.getName() + '.' + name);
         return field;
     }
 
-    private static Method requireMethod(Class<?> owner, String name, Class<?>... params)
+    static Method requireMethod(Class<?> owner, String name, Class<?>... params)
             throws NoSuchMethodException {
         Method method = ModuleMain.findMethod(owner, name, params);
         if (method == null) throw new NoSuchMethodException(owner.getName() + '.' + name);
