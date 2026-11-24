@@ -30,7 +30,10 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import org.json.JSONException;
+
 import java.io.File;
+import java.io.IOException;
 import java.lang.reflect.Method;
 
 /**
@@ -42,7 +45,7 @@ import java.lang.reflect.Method;
  */
 public final class AboutActivity extends Activity {
     private static final Uri PROVIDER = Uri.parse("content://" + Config.AUTHORITY);
-    private static final String REPO_URL = "https://github.com/InternetBugs/LocalAiNotif";
+    private static final String REPO_URL = ReleaseUpdate.REPO_URL;
     private static final String RELEASES_URL = REPO_URL + "/releases";
     private static final String LICENSE_URL = REPO_URL + "/blob/main/LICENSE";
     private static final String DEVELOPER_NAME = "酥鱼 (InternetBugs)";
@@ -55,6 +58,7 @@ public final class AboutActivity extends Activity {
 
     private HyperSettingsUi.SwitchRowParts mSystemEntryRow;
     private HyperSettingsUi.SwitchRowParts mHideIconRow;
+    private HyperSettingsUi.NavRowParts mUpdateRow;
     private HyperSettingsUi.NavRowParts mModuleStatusRow;
     private HyperSettingsUi.NavRowParts mDeviceRow;
     private HyperSettingsUi.NavRowParts mModelStatusRow;
@@ -194,10 +198,11 @@ public final class AboutActivity extends Activity {
         projectCard.addView(repoRow.row);
         projectCard.addView(HyperSettingsUi.createInsetDivider(this, mPalette));
 
-        HyperSettingsUi.NavRowParts updateRow = HyperSettingsUi.createNavRow(
-                this, mPalette, "检查更新", "前往 GitHub Releases 查看最新版本。", null, false, false, true);
-        updateRow.row.setOnClickListener(v -> openExternalUrl(RELEASES_URL));
-        projectCard.addView(updateRow.row);
+        mUpdateRow = HyperSettingsUi.createNavRow(
+                this, mPalette, "检查更新", "检查是否有新的正式版。", null, false, false, true);
+        mUpdateRow.summary.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        mUpdateRow.row.setOnClickListener(view -> checkForUpdate());
+        projectCard.addView(mUpdateRow.row);
         content.addView(projectCard);
 
         // Group 3: 运行环境
@@ -640,6 +645,77 @@ public final class AboutActivity extends Activity {
 
         HyperSettingsUi.attachBottomSheetContent(this, dialog, sheet);
         dialog.show();
+    }
+
+    private void checkForUpdate() {
+        mUpdateRow.row.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK);
+        setUpdateStatus("正在检查更新…", true);
+        new Thread(() -> {
+            try {
+                PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+                String installed = info.versionName != null ? info.versionName : Config.MODULE_VERSION_NAME;
+                ReleaseUpdate update = ReleaseUpdate.check(installed);
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed()) return;
+                    if (update == null) {
+                        setUpdateStatus("当前版本 v" + installed + " 无需更新。", false);
+                        return;
+                    }
+                    setUpdateStatus("发现新版本 " + update.tag, false);
+                    if (!hasWindowFocus()) return;
+                    if (update.downloadUrl == null) {
+                        showUpdateFallback("此版本暂未提供可下载的安装包。",
+                                REPO_URL + "/releases/tag/" + update.tag);
+                        return;
+                    }
+                    HyperSettingsUi.showConfirmDialog(this, mPalette, "发现新版本 " + update.tag,
+                            "当前版本 v" + installed + "。安装包大小为 " + ModelCatalog.formatBytes(update.size)
+                                    + "，将保存到系统「下载」文件夹。",
+                            "下载更新", false, () -> downloadUpdate(update));
+                });
+            } catch (IOException | JSONException | PackageManager.NameNotFoundException | RuntimeException failure) {
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed()) return;
+                    setUpdateStatus("检查失败，点按重试。", false);
+                    if (hasWindowFocus()) showUpdateFallback("暂时无法获取版本信息，可前往发布页查看。", RELEASES_URL);
+                });
+            }
+        }, "LocalAiNotif-check-update").start();
+    }
+
+    private void downloadUpdate(ReleaseUpdate update) {
+        setUpdateStatus("正在准备下载…", true);
+        new Thread(() -> {
+            try {
+                ReleaseUpdate.DownloadState state = ReleaseUpdate.download(getApplicationContext(), update);
+                String status = switch (state) {
+                    case QUEUED -> "已开始下载 " + update.tag + "，可在系统「下载」中查看。";
+                    case IN_PROGRESS -> "正在下载 " + update.tag + "，可在系统「下载」中查看。";
+                    case ALREADY_DOWNLOADED -> "已下载 " + update.tag + "，可在系统「下载」中打开。";
+                };
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed()) return;
+                    setUpdateStatus(status, false);
+                });
+            } catch (IOException | RuntimeException failure) {
+                runOnUiThread(() -> {
+                    if (isFinishing() || isDestroyed()) return;
+                    setUpdateStatus("无法开始下载，点按重试。", false);
+                    if (hasWindowFocus()) showUpdateFallback("系统下载服务不可用，可前往发布页下载。",
+                            REPO_URL + "/releases/tag/" + update.tag);
+                });
+            }
+        }, "LocalAiNotif-download-update").start();
+    }
+
+    private void setUpdateStatus(String text, boolean busy) {
+        mUpdateRow.row.setEnabled(!busy);
+        mUpdateRow.summary.setText(text);
+    }
+
+    private void showUpdateFallback(String message, String url) {
+        HyperSettingsUi.showConfirmDialog(this, mPalette, "检查更新", message, "查看发布页", false,
+                () -> openExternalUrl(url));
     }
 
     private void openExternalUrl(String url) {
