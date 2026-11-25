@@ -56,7 +56,7 @@ public final class Config {
     public static final String KEY_WIFI_ONLY_DOWNLOAD = "wifi_only_download";
     public static final boolean DEFAULT_WIFI_ONLY_DOWNLOAD = true;
     public static final String KEY_ALWAYS_LOAD_MODEL = "always_load_model";
-    public static final boolean DEFAULT_ALWAYS_LOAD_MODEL = false;
+    public static final boolean DEFAULT_ALWAYS_LOAD_MODEL = true;
     public static final String KEY_SHOW_IN_SYSTEM_SETTINGS = "show_in_system_settings";
     public static final boolean DEFAULT_SHOW_IN_SYSTEM_SETTINGS = false;
     public static final String KEY_GLOW_STYLE = "glow_style";

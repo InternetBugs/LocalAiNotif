@@ -483,7 +483,9 @@ public final class MainActivity extends Activity implements ModelDownloadManager
                 this,
                 mPalette,
                 "始终加载 AI 模型",
-                "关闭时按需加载，空闲 3 分钟无推理后自动释放内存。",
+                initialAlwaysLoad
+                        ? "保持模型常驻内存，通知到达时免冷启动。"
+                        : "关闭时按需加载，空闲 3 分钟无推理后自动释放内存。",
                 initialAlwaysLoad,
                 false,
                 true);
