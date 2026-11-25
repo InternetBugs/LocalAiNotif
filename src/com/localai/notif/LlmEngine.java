@@ -126,12 +126,23 @@ public final class LlmEngine implements AutoCloseable {
 
     /** Blocking generation. Returns "" on any internal failure (caller decides fallback). */
     public synchronized String generate(String systemPrompt, String userPrompt, int maxNewTokens) {
+        return generateJsonItems(systemPrompt, userPrompt, maxNewTokens, 0);
+    }
+
+    /**
+     * Blocking generation for structured JSON item arrays ({@code {"items":[...]}}).
+     * When {@code expectedJsonItems > 0}, native decoding halts immediately once the root JSON
+     * object closes or {@code expectedJsonItems} item objects have finished and a trailing comma
+     * starts an extra hallucinated item.
+     */
+    synchronized String generateJsonItems(String systemPrompt, String userPrompt, int maxNewTokens,
+            int expectedJsonItems) {
         if (mPtr == 0) return "";
         byte[] system = utf8(systemPrompt);
         byte[] user = utf8(userPrompt);
         do {
             try {
-                byte[] output = nativeGenerate(mPtr, system, user, maxNewTokens);
+                byte[] output = nativeGenerate(mPtr, system, user, maxNewTokens, expectedJsonItems);
                 if (output != null && output.length > 0) return new String(output, StandardCharsets.UTF_8);
             } catch (Exception | LinkageError | OutOfMemoryError e) {
                 Log.w("LocalAiNotif", "MNN generation failed", e);
@@ -170,7 +181,8 @@ public final class LlmEngine implements AutoCloseable {
 
     private static native long nativeCreate(byte[] configPath, byte[] backend, byte[] options);
 
-    private static native byte[] nativeGenerate(long ptr, byte[] systemPrompt, byte[] userPrompt, int maxNewTokens);
+    private static native byte[] nativeGenerate(long ptr, byte[] systemPrompt, byte[] userPrompt,
+            int maxNewTokens, int expectedJsonItems);
 
     private static native void nativeDestroy(long ptr);
 }

@@ -66,8 +66,8 @@ public final class Config {
     public static final String ACTION_GLOW_STYLE_CHANGED = "com.localai.notif.GLOW_STYLE_CHANGED";
     public static final String EXTRA_FROM_SYSTEM_SETTINGS = "localai_from_system_settings";
     public static final String LAUNCHER_ALIAS_CLASS = "com.localai.notif.MainActivityLauncher";
-    static final int MODULE_VERSION_CODE = 24;
-    static final String MODULE_VERSION_NAME = "2.1.0";
+    static final int MODULE_VERSION_CODE = 25;
+    static final String MODULE_VERSION_NAME = "2.1.1";
     static final String KEY_MODEL_READY = "model_ready";
     static final String KEY_ENGINE_LOADED = "engine_loaded";
     static final String KEY_ENGINE_LOADING = "engine_loading";

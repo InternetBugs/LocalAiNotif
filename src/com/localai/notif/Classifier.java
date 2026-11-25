@@ -6,8 +6,6 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.util.List;
-import java.util.Locale;
-import java.util.regex.Pattern;
 
 /** Pass1 端侧模型批量分类。 */
 final class Classifier {
@@ -32,55 +30,18 @@ final class Classifier {
             + "其余常规消息或无法确定是推广时为normal。"
             + "vip为布尔值:属于验证码、真实资金变动与安全告警、日程变更、家人未接来电、健康告警时vip必须为true且class为important;"
             + "不属于上述类别时vip为false。"
-            + "只输出紧凑JSON,包含全部条目且按id编号,不要任何解释。"
-            + "格式示例:{\"items\":[{\"id\":\"1\",\"class\":\"important\",\"vip\":true},"
-            + "{\"id\":\"2\",\"class\":\"normal\",\"vip\":false},"
-            + "{\"id\":\"3\",\"class\":\"noise\",\"vip\":false}]}";
-
-    /** 推广判定需同时命中的营销线索；模型把闲聊、日程误判为 noise 时据此回退 normal。 */
-    private static final String[] PROMOTION_CUES = {
-        "优惠", "券", "折", "特惠", "特价", "促销", "秒杀", "抢购", "开抢", "限时", "限量",
-        "立减", "满减", "直降", "降价", "低价", "低至", "红包", "补贴", "返现", "福利",
-        "免费", "领取", "包邮", "爆款", "上新", "新品", "好物", "热卖", "热销", "大促",
-        "清仓", "团购", "拼团", "砍价", "抽奖", "中奖", "礼", "积分", "会员", "专享", "惊喜",
-        "下单", "购物", "购买", "活动", "推荐", "猜你喜欢", "邀请好友", "双11", "双十一",
-        "618", "年货", "¥", "￥", "sale", "coupon", "deal", "promo", "discount", "% off",
-        "offer", "free", "voucher", "cashback", "gift"
-    };
-    private static final String[] PROMOTION_CHANNEL_CUES = {
-        "promo", "market", "mkt", "advert", "ads", "activity", "campaign", "operat",
-        "recommend", "推广", "营销", "活动", "推荐"
-    };
-
-    /** 确定性兜底信号:验证码、金额+收支动作、营销权益到期。 */
-    private static final Pattern CODE_WORD =
-            Pattern.compile("验证码|校验码|动态码|动态密码|动态口令|确认码");
-    private static final Pattern CODE_DIGITS = Pattern.compile("\\d{4,8}");
-    private static final Pattern AMOUNT = Pattern.compile(
-            "(?:[¥￥]\\s?\\d[\\d,]*(?:\\.\\d{1,2})?)|(?:\\d[\\d,]*(?:\\.\\d{1,2})?\\s?元)");
-    private static final Pattern MONEY_WORD = Pattern.compile(
-            "消费|扣款|收款|退款|转入|转出|到账|入账|还款|支付成功|提现|转账|账单|交易");
-    private static final Pattern MARKETING_WORD = Pattern.compile(
-            "满减|立减|优惠|折扣|券|红包|返现|补贴|活动|特惠|秒杀|限时|领券|京豆|积分");
-    private static final Pattern EXPIRY_WORD = Pattern.compile(
-            "过期|到期|失效|最后一天|尽快使用|记得使用|即将结束");
-    private static final Pattern PROMO_NOUN = Pattern.compile(
-            "优惠券|代金券|红包|京豆|积分|会员|权益|卡券|券|福利");
+            + "只输出一个紧凑JSON对象,items数组条数必须严格等于输入通知条数,id仅使用输入给定的编号,输出完最后一条后立即闭合]}结束,严禁续写或编造多余id,不要任何解释。"
+            + "单条示例:{\"items\":[{\"id\":\"1\",\"class\":\"important\",\"vip\":true}]}";
 
     /** 每条正文截断长度,防 prompt 爆炸。 */
     private static final int TEXT_CLIP = 256;
+    /** 固定外层包裹与可选空思考块开销。 */
+    private static final int BASE_OUTPUT_TOKENS = 20;
     /** 每条预留的输出 token 数(含 JSON 括号开销)。 */
-    private static final int TOKENS_PER_ITEM = 36;
+    private static final int TOKENS_PER_ITEM = 24;
+    private static final int MAX_OUTPUT_TOKENS = 320;
 
     private Classifier() {}
-
-    static boolean hasPromotionCue(String title, String text, String channel) {
-        String body = (safe(title) + "\n" + safe(text)).toLowerCase(Locale.ROOT);
-        for (String cue : PROMOTION_CUES) if (body.contains(cue)) return true;
-        String ch = safe(channel).toLowerCase(Locale.ROOT);
-        for (String cue : PROMOTION_CHANNEL_CUES) if (ch.contains(cue)) return true;
-        return false;
-    }
 
     /**
      * 按输入顺序返回 [n][2](class/vip)，缺失或无效的结果不填充。
@@ -89,68 +50,30 @@ final class Classifier {
             List<String> packages, List<String> channels) {
         int n = messages.size();
         String[][] result = new String[n][2];
+        if (n == 0) return result;
         String raw;
         try {
-            raw = engine.generate(SYSTEM_PROMPT, buildUserPrompt(titles, messages,
-                    packages, channels), Math.min(64 + TOKENS_PER_ITEM * n, 512));
+            int maxTokens = Math.min(BASE_OUTPUT_TOKENS + TOKENS_PER_ITEM * n, MAX_OUTPUT_TOKENS);
+            raw = engine.generateJsonItems(
+                    SYSTEM_PROMPT,
+                    buildUserPrompt(titles, messages, packages, channels),
+                    maxTokens,
+                    n);
         } catch (Throwable t) {
             Log.e(TAG, "classify generate: " + t);
             return result;
         }
         parseJson(raw, result);
-        for (int index = 0; index < n; index++) {
-            String text = safe(titles.get(index)) + "\n" + safe(messages.get(index));
-            if (looksLikeVerificationCode(text) || looksLikeMoneyMovement(text)) {
-                if (!CLASS_IMPORTANT.equals(result[index][0]) || !"true".equals(result[index][1])) {
-                    Log.i(TAG, "classify " + index + ": forced important (deterministic signal)");
-                }
-                result[index][0] = CLASS_IMPORTANT;
-                result[index][1] = "true";
-                continue;
-            }
-            if (looksLikePromotionExpiry(text)) {
-                if (!CLASS_NOISE.equals(result[index][0])) {
-                    Log.i(TAG, "classify " + index + ": forced noise (promotion expiry)");
-                }
-                result[index][0] = CLASS_NOISE;
-                result[index][1] = "false";
-                continue;
-            }
-            if (!CLASS_NOISE.equals(result[index][0])) continue;
-            String message = safe(messages.get(index));
-            if (message.length() > TEXT_CLIP
-                    || !hasPromotionCue(titles.get(index), message, channelAt(channels, index))) {
-                Log.i(TAG, "classify " + index + ": noise downgraded to normal (no promotion cue)");
-                result[index][0] = CLASS_NORMAL;
-            }
-        }
         return result;
-    }
-
-    /** 验证码:命中验证码类措辞并有 4~8 位数字。 */
-    private static boolean looksLikeVerificationCode(String text) {
-        return CODE_WORD.matcher(text).find() && CODE_DIGITS.matcher(text).find();
-    }
-
-    /**
-     * 真实资金变动:有金额且有收支动作,且不是「满减/立减/优惠券」一类营销话术。
-     */
-    private static boolean looksLikeMoneyMovement(String text) {
-        if (MARKETING_WORD.matcher(text).find()) return false;
-        return AMOUNT.matcher(text).find() && MONEY_WORD.matcher(text).find();
-    }
-
-    /** 优惠券/红包/积分等营销权益的到期、失效、催用提醒。 */
-    private static boolean looksLikePromotionExpiry(String text) {
-        return EXPIRY_WORD.matcher(text).find() && PROMO_NOUN.matcher(text).find();
     }
 
     /** 构造批量分类的 user prompt。 */
     private static String buildUserPrompt(List<String> titles, List<String> messages,
             List<String> packages, List<String> channels) {
+        int n = messages.size();
         StringBuilder sb = new StringBuilder();
-        sb.append("以下是需要分类的").append(messages.size()).append("条通知:\n");
-        for (int i = 0; i < messages.size(); i++) {
+        sb.append("以下是需要分类的").append(n).append("条通知:\n");
+        for (int i = 0; i < n; i++) {
             sb.append("id:").append(i + 1)
               .append("\n包名:").append(safe(packages.get(i)))
               .append("\n通道:").append(safe(channelAt(channels, i)))
@@ -158,16 +81,22 @@ final class Classifier {
               .append("\n内容:").append(LlmEngine.clip(safe(messages.get(i)), TEXT_CLIP))
               .append('\n');
         }
-        sb.append("对以上全部通知逐条分类,只输出紧凑JSON对象{\"items\":[...]},不要解释。")
-          .append(NO_THINK);
+        if (n == 1) {
+            sb.append("仅此1条通知(id为\"1\"),只输出紧凑JSON对象{\"items\":[{\"id\":\"1\",\"class\":\"...\",\"vip\":true或false}]},闭合]}后立即停止,严禁输出id:\"2\"或解释。");
+        } else {
+            sb.append("共").append(n).append("条通知(id仅\"1\"到\"").append(n)
+              .append("\"),逐条分类并只输出紧凑JSON对象{\"items\":[...]},输出完id=\"").append(n)
+              .append("\"后立即闭合]}停止,严禁编造多余id或解释。");
+        }
+        sb.append(NO_THINK);
         return sb.toString();
     }
 
     /**
      * 从原始输出中截取首个 '{' 到末个 '}' 的 JSON 并逐项填充;
-     * 解析到哪条填哪条,缺失/非法项保持 null 走兜底。
+     * 解析到哪条填哪条,缺失/非法项保持 null 由调用方按未分类处理。
      */
-    private static void parseJson(String raw, String[][] result) {
+    static void parseJson(String raw, String[][] result) {
         if (raw == null) return;
         int start = raw.indexOf('{');
         if (start < 0) return;
@@ -178,10 +107,12 @@ final class Classifier {
         try {
             items = new JSONObject(body).optJSONArray("items");
         } catch (Throwable t) {
-            // 贪婪解码偶尔自增 id 重复输出,把条目数组顶到 token 上限而半截收尾;
-            // 整段解析失败会丢掉全部结果,改为抢救已闭合的条目对象。
-            Log.w(TAG, "classify JSON truncated, salvaging items: " + t);
+            // 流式早停(拦下贪婪自增 id 续写)或达 token 上限时外层括号未闭合,抢救已闭合的条目对象。
             items = salvageItems(body);
+            if (items.length() < result.length) {
+                Log.w(TAG, "classify JSON truncated, salvaged " + items.length()
+                        + "/" + result.length + " items: " + t);
+            }
         }
         if (items == null) return;
         boolean[] seen = new boolean[result.length];

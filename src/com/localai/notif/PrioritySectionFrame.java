@@ -109,8 +109,10 @@ final class PrioritySectionFrame implements ViewTreeObserver.OnPreDrawListener {
     private static final Map<View, Integer> sMergedBgHeightOverrides = new IdentityHashMap<>();
     private static final Map<View, Float> sMergedBgRadii = new IdentityHashMap<>();
     private static final Map<View, Integer> sMergedRowHeightOverrides = new IdentityHashMap<>();
+    private static final Map<View, Float> sDockedSuperTransZOverrides = new IdentityHashMap<>();
     private static final Set<View> sSuppressedBgs = Collections.newSetFromMap(new IdentityHashMap<>());
     private static final Set<View> sForcedVisibleHostBgs = Collections.newSetFromMap(new IdentityHashMap<>());
+    private static final Set<View> sNonHostDockedRows = Collections.newSetFromMap(new IdentityHashMap<>());
 
     // Shared static reflection handles (initialized lazily on main thread by ensureRowMetaLookup)
     private static volatile Class<?> sNbvClass;
@@ -125,6 +127,12 @@ final class PrioritySectionFrame implements ViewTreeObserver.OnPreDrawListener {
     private static volatile Method sGetSuperTranslationYMethod;
     private static volatile Method sGetSuperScaleXMethod;
     private static volatile Method sGetSuperScaleYMethod;
+    private static volatile Method sGetViewSuperTranslationZMethod;
+    private static volatile Method sSetViewSuperTranslationZMethod;
+    private static volatile Method sGetViewSuperTranslationXMethod;
+    private static volatile Method sGetViewSuperScaleXMethod;
+    private static volatile Method sGetViewSuperScaleYMethod;
+    private static volatile Method sGetExtTranslationZMethod;
 
     private final View footer;
     private final View footerContents;
@@ -159,6 +167,12 @@ final class PrioritySectionFrame implements ViewTreeObserver.OnPreDrawListener {
     private Method nbvUpdateBackgroundOutlineMethod;
     private Method miGlassSetSdfMaxSizeMethod;
     private Method updateClippingMethod;
+    private Method getExtClipBottomAmountMethod;
+    private Method getChildrenContainerMethod;
+    private Method getPrivateLayoutMethod;
+    private Method getRowInjectorMethod;
+    private Method getParentRowMethod;
+    private Field injectorStackingProgressField;
 
     private final Paint dividerPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint auraPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -186,6 +200,10 @@ final class PrioritySectionFrame implements ViewTreeObserver.OnPreDrawListener {
     private final Set<View> ownedSuppressedBgs = Collections.newSetFromMap(new IdentityHashMap<>());
     private final Map<View, View> ownedSuppressedBgOwners = new IdentityHashMap<>();
     private final Set<ViewGroup> clipDisabledRows = Collections.newSetFromMap(new IdentityHashMap<>());
+    private final Set<View> ownedDockedZViews = Collections.newSetFromMap(new IdentityHashMap<>());
+    private final Set<View> ownedNonHostDockedRows = Collections.newSetFromMap(new IdentityHashMap<>());
+    private final Set<View> clippedChildrenContainers = Collections.newSetFromMap(new IdentityHashMap<>());
+    private final Set<View> clippedPrivateLayouts = Collections.newSetFromMap(new IdentityHashMap<>());
 
     // Unified merged card geometry (docked rows + shared bottom Footer)
     private final RectF mergedBounds = new RectF();
@@ -297,6 +315,14 @@ final class PrioritySectionFrame implements ViewTreeObserver.OnPreDrawListener {
         return rowView instanceof View v ? sMergedRowHeightOverrides.get(v) : null;
     }
 
+    static Float dockedSuperTransZOverrideFor(Object view) {
+        return view instanceof View v ? sDockedSuperTransZOverrides.get(v) : null;
+    }
+
+    static boolean isNonHostDockedRow(Object rowView) {
+        return rowView instanceof View v && sNonHostDockedRows.contains(v);
+    }
+
     static float mergedRadiusFor(Object bgView, float fallback) {
         if (bgView instanceof View v) {
             Float r = sMergedBgRadii.get(v);
@@ -363,7 +389,12 @@ final class PrioritySectionFrame implements ViewTreeObserver.OnPreDrawListener {
     }
 
     static void enforceManagedBackgroundsForRow(View row) {
-        if (row == null || !hasManagedBackgrounds()) return;
+        if (row == null) return;
+        Float zOverride = sDockedSuperTransZOverrides.get(row);
+        if (zOverride != null) {
+            invokeFloatSetter(sSetViewSuperTranslationZMethod, row, zOverride);
+        }
+        if (!hasManagedBackgrounds()) return;
         enforceRowOwnBackgrounds(row);
         Method isSummary = sIsSummaryWithChildrenMethod;
         Method getChildren = sGetAttachedChildrenMethod;
@@ -506,9 +537,92 @@ final class PrioritySectionFrame implements ViewTreeObserver.OnPreDrawListener {
         return child instanceof View v && rowMembership.contains(v);
     }
 
+    boolean shouldUnifyGroupStacking(Object candidate) {
+        if (!(candidate instanceof View v) || stack == null || v.getParent() != stack
+                || !rowMembership.contains(v) || isPinnedRow(v)) {
+            return false;
+        }
+        ensureRowMetaLookup(v);
+        return true;
+    }
+
+    boolean isChildOfPriorityGroup(Object candidate) {
+        if (!(candidate instanceof View v) || stack == null || rowMembership.isEmpty()) {
+            return false;
+        }
+        View cur = v;
+        while (cur.getParent() instanceof View parentView && parentView != stack) {
+            cur = parentView;
+        }
+        return cur != v && cur.getParent() == stack && rowMembership.contains(cur) && !isPinnedRow(cur);
+    }
+
+    private float currentFooterHeightPx() {
+        return footer.getHeight() > 0
+                ? footer.getHeight()
+                : (footerView != null && footerView.getMeasuredHeight() > 0
+                        ? footerView.getMeasuredHeight()
+                        : 40f * density);
+    }
+
+    private View findTailDockedPriorityRow() {
+        if (!dockedSlots.isEmpty()) {
+            return dockedSlots.get(dockedSlots.size() - 1).row;
+        }
+        View tail = null;
+        for (int i = 0; i < rows.size(); i++) {
+            View r = rows.get(i);
+            if (r == null || r.getParent() != stack || r.getVisibility() != View.VISIBLE || isPinnedRow(r)) {
+                continue;
+            }
+            boolean stacked = false;
+            for (int s = 0; s < stackedSlots.size(); s++) {
+                if (stackedSlots.get(s).row == r) {
+                    stacked = true;
+                    break;
+                }
+            }
+            if (!stacked) {
+                tail = r;
+            }
+        }
+        return tail;
+    }
+
     /**
-     * Returns the vertical offset (equal to the shared Priority Footer height) that must be
-     * subtracted from {@code yTranslation} when HyperOS computes Lockscreen card stacking for
+     * Returns the shared Footer height reserve to add to {@code currentHeight} in
+     * {@code NotificationStackingInteractor.calculateStackingInfo} when the tail docked priority
+     * row is an expanded group or tall card entering {@code calculateBigNotificationStackingResult},
+     * so {@code extClipBottomAmount} leaves exact room for the shared Footer above
+     * {@code stackingBottom} (never covering the Lockscreen fingerprint sensor or bottom shortcuts).
+     */
+    float footerHeightReserveForDockedTail(Object candidate, float currentHeight, int bigNotifHeight) {
+        if (!(candidate instanceof View v) || stack == null || rows.isEmpty()
+                || footer == null || footer.getParent() != stack
+                || footer.getVisibility() != View.VISIBLE
+                || v.getParent() != stack || v.getVisibility() != View.VISIBLE
+                || !rowMembership.contains(v) || isPinnedRow(v)) {
+            return 0f;
+        }
+        ensureRowMetaLookup(v);
+        for (int i = 0; i < stackedSlots.size(); i++) {
+            if (stackedSlots.get(i).row == v) return 0f;
+        }
+        for (int i = 0; i < detachedSlots.size(); i++) {
+            if (detachedSlots.get(i).row == v) return 0f;
+        }
+        View tail = findTailDockedPriorityRow();
+        if (tail != v) return 0f;
+        float fh = currentFooterHeightPx();
+        if (isExpandedGroupRow(v) || (bigNotifHeight > 0 && currentHeight + fh > bigNotifHeight)) {
+            return fh;
+        }
+        return 0f;
+    }
+
+    /**
+     * Returns the vertical offset (equal to the unclipped shared Priority Footer height) that must
+     * be subtracted from {@code yTranslation} when HyperOS computes Lockscreen card stacking for
      * any card positioned after the leading priority row, so peeking stacked cards sit cleanly
      * below the Priority Footer instead of colliding behind/on top of it.
      */
@@ -518,7 +632,7 @@ final class PrioritySectionFrame implements ViewTreeObserver.OnPreDrawListener {
                 || footer.getVisibility() != View.VISIBLE) {
             return 0f;
         }
-        if (v == footer) return 0f;
+        if (v == footer || isChildOfPriorityGroup(v)) return 0f;
 
         View leading = null;
         for (int i = 0; i < rows.size(); i++) {
@@ -530,7 +644,7 @@ final class PrioritySectionFrame implements ViewTreeObserver.OnPreDrawListener {
         }
         if (leading == null) return 0f;
 
-        // Walk up to the direct child of NSSL (covers both top-level rows and expanded group children)
+        // Walk up to the direct child of NSSL (covers both top-level rows and expanded ordinary group children)
         View topLevel = v;
         while (topLevel.getParent() instanceof View parentView && parentView != stack) {
             topLevel = parentView;
@@ -557,11 +671,16 @@ final class PrioritySectionFrame implements ViewTreeObserver.OnPreDrawListener {
             return 0f;
         }
 
-        float fh = footer.getHeight() > 0
-                ? footer.getHeight()
-                : (footerView != null && footerView.getMeasuredHeight() > 0
-                        ? footerView.getMeasuredHeight()
-                        : 40f * density);
+        float fh = currentFooterHeightPx();
+        View tailDocked = findTailDockedPriorityRow();
+        if (tailDocked != null) {
+            int extClip = getRowExtClipBottomAmount(tailDocked);
+            if (extClip > 0) {
+                float sy = invokeFloatGetter(sGetViewSuperScaleYMethod, tailDocked, tailDocked.getScaleY());
+                float scaledClip = extClip * (sy > 0.05f ? sy : 1f);
+                return Math.max(0f, fh - scaledClip);
+            }
+        }
         return fh;
     }
 
@@ -714,9 +833,9 @@ final class PrioritySectionFrame implements ViewTreeObserver.OnPreDrawListener {
 
             slot.row = row;
             slot.alpha = rowAlpha;
-            slot.translationX = row.getTranslationX();
-            slot.scaleX = row.getScaleX();
-            slot.scaleY = row.getScaleY();
+            slot.translationX = invokeFloatGetter(sGetViewSuperTranslationXMethod, row, row.getTranslationX());
+            slot.scaleX = invokeFloatGetter(sGetViewSuperScaleXMethod, row, row.getScaleX());
+            slot.scaleY = invokeFloatGetter(sGetViewSuperScaleYMethod, row, row.getScaleY());
             resolveCardRadii(row, slot);
             slot.swiping = Math.abs(slot.translationX) > swipeThreshPx;
             slot.expandedGroup = isExpandedGroupRow(row);
@@ -728,11 +847,17 @@ final class PrioritySectionFrame implements ViewTreeObserver.OnPreDrawListener {
                 geometryChanged = true;
             }
 
-            // Detect HyperOS lockscreen stacked deck: row tucked behind an earlier priority row
+            // Detect HyperOS lockscreen / viewport stacked deck: row tucked behind an earlier priority row.
+            // Query ExpandableViewInjector.stackingProgress when available so touch-down bounce (11035,
+            // scale ~0.90 with stackingProgress == 0) never falsely detaches a docked row into stackedSlots.
             boolean stacked = false;
             if (visibleCount > 1) {
                 RowSlot prev = visibleSlots.get(visibleCount - 2);
-                if (slot.scaleX < 0.985f || slot.bounds.top < prev.bounds.bottom - 14f * density) {
+                float stackingProg = getRowStackingProgress(row);
+                if (stackingProg >= 0f) {
+                    stacked = stackingProg > 0.015f || slot.bounds.top < prev.bounds.bottom - 14f * density;
+                } else if ((slot.scaleX < 0.985f && slot.bounds.top < prev.bounds.bottom - 4f * density)
+                        || slot.bounds.top < prev.bounds.bottom - 14f * density) {
                     stacked = true;
                 }
             }
@@ -997,9 +1122,9 @@ final class PrioritySectionFrame implements ViewTreeObserver.OnPreDrawListener {
         int rowW = hostRow.getWidth();
         if (rowW > 0) {
             Rect existingClip = hostRow.getClipBounds();
-            if (existingClip != null && (existingClip.bottom < targetHeightPx || existingClip.right < rowW)) {
+            if (existingClip != null && (existingClip.bottom != targetHeightPx || existingClip.right < rowW)) {
                 hostClipRect.set(existingClip.left, existingClip.top,
-                        Math.max(existingClip.right, rowW), Math.max(existingClip.bottom, targetHeightPx));
+                        Math.max(existingClip.right, rowW), targetHeightPx);
                 hostRow.setClipBounds(hostClipRect);
             }
         }
@@ -1015,6 +1140,7 @@ final class PrioritySectionFrame implements ViewTreeObserver.OnPreDrawListener {
             activeHostMergedHeightPx = targetHeightPx;
             activeHostBgWidthPx = bgWidth;
             refreshNativeBackgroundOutlineAndGlass(hostBg, bgWidth, targetHeightPx);
+            hostRow.invalidateOutline();
             geometryChanged = true;
         }
 
@@ -1032,6 +1158,228 @@ final class PrioritySectionFrame implements ViewTreeObserver.OnPreDrawListener {
             enforceManagedBackgroundView(bg);
             if ((newlySuppressed || stateChanged) && ownerRow != null) {
                 ownerRow.invalidate();
+            }
+        }
+
+        // Equalize Z-order across all non-host docked priority rows + shared Footer so hostRow's
+        // stretched Liquid Glass / MiBlur background never occludes lower docked priority rows.
+        syncDockedZOrder(hostRow);
+
+        // Clip inner notification content right above the shared Footer hairline whenever any
+        // docked row is bottom-clipped by Lockscreen / viewport stackingBottom (extClipBottomAmount > 0).
+        syncDockedContentViewportClips();
+    }
+
+    private void syncDockedZOrder(View hostRow) {
+        if (hostRow == null) {
+            releaseDockedZOrder();
+            return;
+        }
+        // Ensure hostRow itself always runs at its genuine native Z-plane (e.g. behind MediaHeader,
+        // in front of stacked/ordinary rows below).
+        if (ownedDockedZViews.remove(hostRow)) {
+            sDockedSuperTransZOverrides.remove(hostRow);
+            restoreNativeSuperTransZ(hostRow);
+        }
+
+        float hostSuperZ = invokeFloatGetter(
+                sGetViewSuperTranslationZMethod, hostRow, hostRow.getTranslationZ());
+        float hostTotalZ = hostRow.getElevation() + hostSuperZ;
+        int hostChildIdx = stack != null ? stack.indexOfChild(hostRow) : -1;
+
+        Set<View> nextNonHostRows = Collections.newSetFromMap(new IdentityHashMap<>());
+        Map<View, Float> nextZTargets = new IdentityHashMap<>();
+
+        for (int i = 1; i < dockedSlots.size(); i++) {
+            View r = dockedSlots.get(i).row;
+            if (r == null || r == hostRow) continue;
+            nextNonHostRows.add(r);
+            int idx = stack != null ? stack.indexOfChild(r) : -1;
+            float eps = (hostChildIdx >= 0 && idx >= 0 && idx < hostChildIdx) ? (0.01f * i) : 0f;
+            nextZTargets.put(r, hostTotalZ - r.getElevation() + eps);
+        }
+
+        if (footer != null && footerDrawnVisible && footer.getParent() == stack) {
+            int fIdx = stack.indexOfChild(footer);
+            float eps = (hostChildIdx >= 0 && fIdx >= 0 && fIdx < hostChildIdx) ? 0.02f : 0f;
+            nextZTargets.put(footer, hostTotalZ - footer.getElevation() + eps);
+        }
+
+        if (!ownedNonHostDockedRows.isEmpty()) {
+            List<View> staleRows = null;
+            for (View r : ownedNonHostDockedRows) {
+                if (!nextNonHostRows.contains(r)) {
+                    if (staleRows == null) staleRows = new ArrayList<>();
+                    staleRows.add(r);
+                }
+            }
+            if (staleRows != null) {
+                for (View r : staleRows) {
+                    ownedNonHostDockedRows.remove(r);
+                    sNonHostDockedRows.remove(r);
+                    r.invalidateOutline();
+                }
+            }
+        }
+        for (View r : nextNonHostRows) {
+            if (ownedNonHostDockedRows.add(r)) {
+                sNonHostDockedRows.add(r);
+                r.invalidateOutline();
+            }
+        }
+
+        if (!ownedDockedZViews.isEmpty()) {
+            List<View> toRelease = null;
+            for (View oldView : ownedDockedZViews) {
+                if (!nextZTargets.containsKey(oldView)) {
+                    if (toRelease == null) toRelease = new ArrayList<>();
+                    toRelease.add(oldView);
+                }
+            }
+            if (toRelease != null) {
+                for (View oldView : toRelease) {
+                    ownedDockedZViews.remove(oldView);
+                    sDockedSuperTransZOverrides.remove(oldView);
+                    restoreNativeSuperTransZ(oldView);
+                }
+            }
+        }
+
+        for (Map.Entry<View, Float> entry : nextZTargets.entrySet()) {
+            View v = entry.getKey();
+            float targetSuperZ = entry.getValue();
+            ownedDockedZViews.add(v);
+            sDockedSuperTransZOverrides.put(v, targetSuperZ);
+            float curSuperZ = invokeFloatGetter(sGetViewSuperTranslationZMethod, v, v.getTranslationZ());
+            if (Math.abs(curSuperZ - targetSuperZ) > 0.0005f) {
+                invokeFloatSetter(sSetViewSuperTranslationZMethod, v, targetSuperZ);
+            }
+        }
+    }
+
+    private void releaseDockedZOrder() {
+        if (!ownedDockedZViews.isEmpty()) {
+            for (View v : ownedDockedZViews) {
+                sDockedSuperTransZOverrides.remove(v);
+                restoreNativeSuperTransZ(v);
+            }
+            ownedDockedZViews.clear();
+        }
+        if (!ownedNonHostDockedRows.isEmpty()) {
+            for (View r : ownedNonHostDockedRows) {
+                sNonHostDockedRows.remove(r);
+                r.invalidateOutline();
+            }
+            ownedNonHostDockedRows.clear();
+        }
+    }
+
+    private static void restoreNativeSuperTransZ(View view) {
+        if (view == null || sSetViewSuperTranslationZMethod == null) return;
+        float extZ = invokeFloatGetter(sGetExtTranslationZMethod, view, 0f);
+        invokeFloatSetter(sSetViewSuperTranslationZMethod, view, view.getTranslationZ() + extZ);
+    }
+
+    private void syncDockedContentViewportClips() {
+        Set<View> nextContainers = null;
+        Set<View> nextPrivateLayouts = null;
+
+        for (int i = 0; i < dockedSlots.size(); i++) {
+            View row = dockedSlots.get(i).row;
+            if (row == null) continue;
+            int extClip = getRowExtClipBottomAmount(row);
+            if (extClip <= 0) continue;
+
+            int clipTop = 0;
+            int clipH = 0;
+            try {
+                clipTop = Math.max(0, Math.max((int) getClipTopAmount.invoke(row),
+                        (int) getTopOverlap.invoke(row)));
+                clipH = (int) getClipHeight.invoke(row);
+            } catch (Throwable ignored) {}
+            if (clipH <= 0) continue;
+            int localContentBottom = clipTop + clipH;
+
+            if (getChildrenContainerMethod != null && isSummaryWithChildrenRow(row)) {
+                try {
+                    if (getChildrenContainerMethod.invoke(row) instanceof View cc
+                            && cc.getVisibility() == View.VISIBLE && cc.getWidth() > 0) {
+                        int bottom = Math.max(0, localContentBottom - cc.getTop());
+                        Rect existing = cc.getClipBounds();
+                        if (existing == null || existing.left != 0 || existing.top != 0
+                                || existing.right != cc.getWidth() || existing.bottom != bottom) {
+                            cc.setClipBounds(new Rect(0, 0, cc.getWidth(), bottom));
+                        }
+                        if (nextContainers == null) {
+                            nextContainers = Collections.newSetFromMap(new IdentityHashMap<>());
+                        }
+                        nextContainers.add(cc);
+                        clippedChildrenContainers.add(cc);
+                    }
+                } catch (Throwable ignored) {}
+            }
+
+            if (getPrivateLayoutMethod != null) {
+                try {
+                    if (getPrivateLayoutMethod.invoke(row) instanceof View pl
+                            && pl.getVisibility() == View.VISIBLE && pl.getWidth() > 0) {
+                        int bottom = Math.max(0, localContentBottom - pl.getTop());
+                        Rect existing = pl.getClipBounds();
+                        if (existing == null || existing.bottom > bottom) {
+                            int left = existing != null ? existing.left : 0;
+                            int top = existing != null ? existing.top : 0;
+                            int right = existing != null ? existing.right : pl.getWidth();
+                            pl.setClipBounds(new Rect(left, top, right, bottom));
+                        }
+                        if (nextPrivateLayouts == null) {
+                            nextPrivateLayouts = Collections.newSetFromMap(new IdentityHashMap<>());
+                        }
+                        nextPrivateLayouts.add(pl);
+                        clippedPrivateLayouts.add(pl);
+                    }
+                } catch (Throwable ignored) {}
+            }
+        }
+
+        releaseStaleViewportClips(nextContainers, nextPrivateLayouts);
+    }
+
+    private void releaseStaleViewportClips(Set<View> keepContainers, Set<View> keepPrivateLayouts) {
+        if (!clippedChildrenContainers.isEmpty()) {
+            List<View> toRestore = null;
+            for (View cc : clippedChildrenContainers) {
+                if (keepContainers == null || !keepContainers.contains(cc)) {
+                    if (toRestore == null) toRestore = new ArrayList<>();
+                    toRestore.add(cc);
+                }
+            }
+            if (toRestore != null) {
+                for (View cc : toRestore) {
+                    clippedChildrenContainers.remove(cc);
+                    cc.setClipBounds(null);
+                }
+            }
+        }
+        if (!clippedPrivateLayouts.isEmpty()) {
+            List<View> toRestore = null;
+            for (View pl : clippedPrivateLayouts) {
+                if (keepPrivateLayouts == null || !keepPrivateLayouts.contains(pl)) {
+                    if (toRestore == null) toRestore = new ArrayList<>();
+                    toRestore.add(pl);
+                }
+            }
+            if (toRestore != null) {
+                for (View pl : toRestore) {
+                    clippedPrivateLayouts.remove(pl);
+                    Method updateClip = ModuleMain.findMethod(pl.getClass(), "updateClipping");
+                    if (updateClip != null) {
+                        try {
+                            updateClip.invoke(pl);
+                            continue;
+                        } catch (Throwable ignored) {}
+                    }
+                    pl.setClipBounds(null);
+                }
             }
         }
     }
@@ -1073,6 +1421,7 @@ final class PrioritySectionFrame implements ViewTreeObserver.OnPreDrawListener {
                     updateClippingMethod.invoke(oldRow);
                 } catch (Throwable ignored) {}
             }
+            oldRow.invalidateOutline();
         }
         if (oldRow instanceof ViewGroup vg && clipDisabledRows.remove(vg)) {
             vg.setClipChildren(true);
@@ -1081,6 +1430,8 @@ final class PrioritySectionFrame implements ViewTreeObserver.OnPreDrawListener {
 
     private void restoreAllManagedBackgrounds() {
         releaseActiveHostBackdrop();
+        releaseDockedZOrder();
+        releaseStaleViewportClips(null, null);
         if (!ownedSuppressedBgs.isEmpty()) {
             for (View bg : ownedSuppressedBgs) {
                 View ownerRow = ownedSuppressedBgOwners.remove(bg);
@@ -1250,11 +1601,12 @@ final class PrioritySectionFrame implements ViewTreeObserver.OnPreDrawListener {
                     if (child.getVisibility() != View.VISIBLE || child.getAlpha() < 0.08f) continue;
                     int h = child.getHeight();
                     if (h <= 0) continue;
-                    // Accumulate exact local offset through NotificationChildrenContainer up to slot.row
+                    // Accumulate exact rendered offset through NotificationChildrenContainer up to slot.row
+                    // (PropertiesFrameLayout.getY() == getTop() + getSuperTranslationY())
                     float relY = 0f;
                     View cur = child;
                     while (cur != null && cur != slot.row) {
-                        relY += cur.getTop() + cur.getTranslationY();
+                        relY += cur.getY();
                         cur = cur.getParent() instanceof View pv ? pv : null;
                     }
                     float childTop = slot.bounds.top + relY * (slot.scaleY > 0.05f ? slot.scaleY : 1f);
@@ -1269,8 +1621,10 @@ final class PrioritySectionFrame implements ViewTreeObserver.OnPreDrawListener {
                     } else if (childTop >= prevBottom - 6f * density
                             && childTop <= prevBottom + 24f * density) {
                         float y = (prevBottom + childTop) * 0.5f;
-                        internalDividers.add(new DividerLine(
-                                lineLeft, lineRight, y, Math.min(prevAlpha, childAlpha)));
+                        if (y > slot.bounds.top + 12f * density && y < slot.bounds.bottom - 8f * density) {
+                            internalDividers.add(new DividerLine(
+                                    lineLeft, lineRight, y, Math.min(prevAlpha, childAlpha)));
+                        }
                     }
                     prevBottom = childBottom;
                     prevAlpha = childAlpha;
@@ -1392,6 +1746,28 @@ final class PrioritySectionFrame implements ViewTreeObserver.OnPreDrawListener {
         getAttachedChildrenMethod = ModuleMain.findMethod(cls, "getAttachedChildren");
         updateBackgroundForGroupStateMethod = ModuleMain.findMethod(cls, "updateBackgroundForGroupState");
         updateClippingMethod = ModuleMain.findMethod(cls, "updateClipping");
+        getExtClipBottomAmountMethod = ModuleMain.findMethod(cls, "getExtClipBottomAmount");
+        getChildrenContainerMethod = ModuleMain.findMethod(cls, "getChildrenContainer");
+        getPrivateLayoutMethod = ModuleMain.findMethod(cls, "getPrivateLayout");
+        getRowInjectorMethod = ModuleMain.findMethod(cls, "getInjector");
+        getParentRowMethod = ModuleMain.findMethod(cls, "getParentRow");
+        if (getParentRowMethod == null) {
+            getParentRowMethod = ModuleMain.findMethod(cls, "getNotificationParent");
+        }
+        sGetViewSuperTranslationZMethod = ModuleMain.findMethod(cls, "getSuperTranslationZ");
+        sSetViewSuperTranslationZMethod = ModuleMain.findMethod(cls, "setSuperTranslationZ", float.class);
+        sGetViewSuperTranslationXMethod = ModuleMain.findMethod(cls, "getSuperTranslationX");
+        sGetViewSuperScaleXMethod = ModuleMain.findMethod(cls, "getSuperScaleX");
+        sGetViewSuperScaleYMethod = ModuleMain.findMethod(cls, "getSuperScaleY");
+        sGetExtTranslationZMethod = ModuleMain.findMethod(cls, "getExtTranslationZ");
+        if (getRowInjectorMethod != null) {
+            try {
+                Object injObj = getRowInjectorMethod.invoke(row);
+                if (injObj != null) {
+                    injectorStackingProgressField = ModuleMain.findField(injObj.getClass(), "stackingProgress");
+                }
+            } catch (Throwable ignored) {}
+        }
         backgroundNormalField = ModuleMain.findField(cls, "mBackgroundNormal");
         sBackgroundNormalField = backgroundNormalField;
         sIsSummaryWithChildrenMethod = isSummaryWithChildrenMethod;
@@ -1446,6 +1822,31 @@ final class PrioritySectionFrame implements ViewTreeObserver.OnPreDrawListener {
         } catch (Throwable ignored) {
             return false;
         }
+    }
+
+    private int getRowExtClipBottomAmount(View row) {
+        if (row == null || getExtClipBottomAmountMethod == null) return 0;
+        try {
+            Object val = getExtClipBottomAmountMethod.invoke(row);
+            return val instanceof Integer n ? Math.max(0, n) : 0;
+        } catch (Throwable ignored) {
+            return 0;
+        }
+    }
+
+    private float getRowStackingProgress(View row) {
+        if (row == null || getRowInjectorMethod == null) return -1f;
+        try {
+            Object inj = getRowInjectorMethod.invoke(row);
+            if (inj == null) return -1f;
+            if (injectorStackingProgressField == null) {
+                injectorStackingProgressField = ModuleMain.findField(inj.getClass(), "stackingProgress");
+            }
+            if (injectorStackingProgressField != null) {
+                return injectorStackingProgressField.getFloat(inj);
+            }
+        } catch (Throwable ignored) {}
+        return -1f;
     }
 
     private View getRowBackground(View row) {

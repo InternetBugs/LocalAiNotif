@@ -845,8 +845,8 @@ final class SystemUiPrioritySection {
                     if (mergedH != null && mergedH > 0) {
                         int w = v.getWidth();
                         Rect cb = v.getClipBounds();
-                        if (cb != null && w > 0 && (cb.bottom < mergedH || cb.right < w)) {
-                            cb.bottom = Math.max(cb.bottom, mergedH);
+                        if (cb != null && w > 0 && (cb.bottom != mergedH || cb.right < w)) {
+                            cb.bottom = mergedH;
                             cb.right = Math.max(cb.right, w);
                             v.setClipBounds(cb);
                         }
@@ -897,6 +897,7 @@ final class SystemUiPrioritySection {
             Method pflSetScaleY = requireMethod(propLayoutClass, "setScaleY", float.class);
             Method pflSetSuperScaleX = requireMethod(propLayoutClass, "setSuperScaleX", float.class);
             Method pflSetSuperScaleY = requireMethod(propLayoutClass, "setSuperScaleY", float.class);
+            Method pflSetSuperTransZ = requireMethod(propLayoutClass, "setSuperTranslationZ", float.class);
 
             module.hook(pflSetTransY).intercept(chain -> {
                 if (PrioritySectionFrame.isForcedVisibleHostBackground(chain.getThisObject())) {
@@ -934,6 +935,55 @@ final class SystemUiPrioritySection {
                 }
                 return chain.proceed();
             });
+            module.hook(pflSetSuperTransZ).intercept(chain -> {
+                Float zOverride = PrioritySectionFrame.dockedSuperTransZOverrideFor(chain.getThisObject());
+                if (zOverride != null) {
+                    return chain.proceed(new Object[]{zOverride});
+                }
+                return chain.proceed();
+            });
+
+            // Extend hostRow's stackingOutlineProvider to cover the shared Priority Footer when
+            // bottom-clipped by stackingBottom, and use a straight horizontal bottom clip on
+            // non-host docked rows sitting directly above the Footer hairline.
+            try {
+                Class<?> stackingOutlineClass = loader.loadClass(
+                        NOTIFICATION + "row.ExpandableViewInjector$stackingOutlineProvider$1");
+                Method getStackingOutline = requireMethod(
+                        stackingOutlineClass, "getOutline", View.class, Outline.class);
+                Method getClipHeightMethod = requireMethod(expViewClass, "getClipHeight");
+                module.hook(getStackingOutline).intercept(chain -> {
+                    Object result = chain.proceed();
+                    View view = (View) chain.getArg(0);
+                    Outline outline = (Outline) chain.getArg(1);
+                    if (view == null || outline == null) return result;
+                    int w = view.getWidth();
+                    if (w <= 0) return result;
+                    Integer mergedH = PrioritySectionFrame.mergedRowHeightOverrideFor(view);
+                    if (mergedH != null && mergedH > 0) {
+                        float fallbackR = 25f * view.getResources().getDisplayMetrics().density;
+                        View bg = null;
+                        try {
+                            Field f = ModuleMain.findField(view.getClass(), "mBackgroundNormal");
+                            if (f != null && f.get(view) instanceof View bv) bg = bv;
+                        } catch (Throwable ignored) {}
+                        float r = PrioritySectionFrame.mergedRadiusFor(bg != null ? bg : view, fallbackR);
+                        outline.setRoundRect(0, 0, w, mergedH, r);
+                        return result;
+                    }
+                    if (PrioritySectionFrame.isNonHostDockedRow(view)) {
+                        try {
+                            int clipH = (int) getClipHeightMethod.invoke(view);
+                            if (clipH > 0) {
+                                outline.setRect(0, 0, w, clipH);
+                            }
+                        } catch (Throwable ignored) {}
+                    }
+                    return result;
+                });
+            } catch (Throwable t) {
+                module.log(Log.WARN, TAG, "Failed to hook stackingOutlineProvider for priority merge", t);
+            }
 
             Class<?> rowClass = loader.loadClass(NOTIFICATION + "row.ExpandableNotificationRow");
             Field bgField = requireField(rowClass, "mBackgroundNormal");
@@ -998,35 +1048,198 @@ final class SystemUiPrioritySection {
             module.log(Log.WARN, TAG, "Failed to hook group background / clip state for priority merge", t);
         }
 
-        // 4. Keep HyperOS Lockscreen stacking clear of our shared Priority Footer
+        // 4. Keep HyperOS Lockscreen / viewport stacking harmonious with our unified Priority Card & Footer
         try {
             Class<?> interactorClass = loader.loadClass(
                     "com.miui.systemui.notification.domain.interactor.NotificationStackingInteractor");
             Class<?> expBaseClass = loader.loadClass(
                     "com.miui.systemui.notification.row.ExpandableViewBase");
+            Class<?> expViewClass = loader.loadClass(NOTIFICATION + "row.ExpandableView");
+            Class<?> rowClass = loader.loadClass(NOTIFICATION + "row.ExpandableNotificationRow");
+            Class<?> viewInjectorClass = loader.loadClass(NOTIFICATION + "row.ExpandableViewInjector");
             Class<?> infoClass = loader.loadClass(
                     "com.miui.systemui.notification.view.NotificationRowStackingInfo");
             Field emptyInfoField = requireField(infoClass, "EMPTY");
             Object emptyInfo = emptyInfoField.get(null);
+            Field miuiBigHeightField = ModuleMain.findField(interactorClass, "miuiBigNotificationHeight");
             Method calcStacking = requireMethod(interactorClass, "calculateStackingInfo",
                     expBaseClass, float.class, float.class, boolean.class, float.class);
+            Method updateChildStacking = ModuleMain.findMethod(interactorClass, "updateChildStackingInfo",
+                    expBaseClass, float.class, float.class);
+            Method updateParentStacking = ModuleMain.findMethod(interactorClass, "updateParentStackingInfo",
+                    expBaseClass, float.class, float.class);
+            Method resetChildrenStacking = ModuleMain.findMethod(interactorClass,
+                    "resetGroupChildrenStackingInfo", rowClass);
+            Method getViewInjector = ModuleMain.findMethod(expViewClass, "getInjector");
+            Field injIsLastNotif = ModuleMain.findField(viewInjectorClass, "isLastNotif");
+            Field injIsLastFocusNotif = ModuleMain.findField(viewInjectorClass, "isLastFocusNotif");
+            Method calcWithTransition = ModuleMain.findMethod(viewInjectorClass, "calculateWithTransition",
+                    expViewClass, float.class, float.class, boolean.class, float.class);
+            Method setExtTransZ = ModuleMain.findMethod(expBaseClass, "setExtTranslationZ", float.class);
+            Method getViewState = ModuleMain.findMethod(expViewClass, "getViewState");
+            Field vsInjectorField = getViewState != null
+                    ? ModuleMain.findField(loader.loadClass(NOTIFICATION + "stack.ViewState"), "mInjector")
+                    : null;
+            Method combineFolmeTransZ = vsInjectorField != null
+                    ? ModuleMain.findMethod(vsInjectorField.getType(), "combineFolmeTranslationZ")
+                    : null;
+            Method getChildrenContainer = ModuleMain.findMethod(rowClass, "getChildrenContainer");
+            Field nccInjectorField = getChildrenContainer != null
+                    ? ModuleMain.findField(
+                            loader.loadClass(NOTIFICATION + "stack.NotificationChildrenContainer"), "mInjector")
+                    : null;
+            Field ncciIconAreaField = nccInjectorField != null
+                    ? ModuleMain.findField(nccInjectorField.getType(), "iconArea")
+                    : null;
+            Field ncciGroupHeaderField = nccInjectorField != null
+                    ? ModuleMain.findField(nccInjectorField.getType(), "mMiuiGroupHeader")
+                    : null;
+            Method headerSetStackingDist = ncciGroupHeaderField != null
+                    ? ModuleMain.findMethod(ncciGroupHeaderField.getType(), "setStackingDistance", float.class)
+                    : null;
+            Method pflSetSuperTransY = ncciGroupHeaderField != null
+                    ? ModuleMain.findMethod(ncciGroupHeaderField.getType(), "setSuperTranslationY", float.class)
+                    : null;
+            Method pflSetSuperScaleX = ncciGroupHeaderField != null
+                    ? ModuleMain.findMethod(ncciGroupHeaderField.getType(), "setSuperScaleX", float.class)
+                    : null;
+            Method pflSetSuperScaleY = ncciGroupHeaderField != null
+                    ? ModuleMain.findMethod(ncciGroupHeaderField.getType(), "setSuperScaleY", float.class)
+                    : null;
+            Method pflSetSuperAlpha = ncciGroupHeaderField != null
+                    ? ModuleMain.findMethod(ncciGroupHeaderField.getType(), "setSuperAlpha", float.class)
+                    : null;
+
+            // Keep expanded Priority Group children unified at 1.0x scale inside the merged card
+            // (never bunching/shrinking individual children into overlapping transparent text soup).
+            if (updateChildStacking != null) {
+                module.hook(updateChildStacking).intercept(chain -> {
+                    Object childView = chain.getArg(0);
+                    if (childView != null) {
+                        for (PrioritySectionFrame frame : activeFrames.values()) {
+                            if (frame != null && frame.isChildOfPriorityGroup(childView)) {
+                                if (setExtTransZ != null) {
+                                    float folmeZ = 0f;
+                                    if (getViewState != null && vsInjectorField != null
+                                            && combineFolmeTransZ != null) {
+                                        try {
+                                            Object vs = getViewState.invoke(childView);
+                                            Object vsInj = vs != null ? vsInjectorField.get(vs) : null;
+                                            if (vsInj != null
+                                                    && combineFolmeTransZ.invoke(vsInj) instanceof Float fz) {
+                                                folmeZ = fz;
+                                            }
+                                        } catch (Throwable ignored) {}
+                                    }
+                                    try {
+                                        setExtTransZ.invoke(childView, folmeZ);
+                                    } catch (Throwable ignored) {}
+                                }
+                                return emptyInfo;
+                            }
+                        }
+                    }
+                    return chain.proceed();
+                });
+            }
+
+            // Treat an expanded Priority Group as one unified tall card in NotificationStackingInteractor
+            // (identical to MIUI's unified-container big-notification clipping path) so it clips cleanly
+            // above Lockscreen's fingerprint sensor / bottom shortcuts without child pile-up.
+            if (updateParentStacking != null && getViewInjector != null && calcWithTransition != null) {
+                module.hook(updateParentStacking).intercept(chain -> {
+                    Object parentObj = chain.getArg(0);
+                    if (parentObj instanceof View parentView) {
+                        for (PrioritySectionFrame frame : activeFrames.values()) {
+                            if (frame != null && frame.shouldUnifyGroupStacking(parentView)) {
+                                try {
+                                    if (resetChildrenStacking != null) {
+                                        resetChildrenStacking.invoke(null, parentView);
+                                    }
+                                    if (getChildrenContainer != null && nccInjectorField != null) {
+                                        Object cc = getChildrenContainer.invoke(parentView);
+                                        Object ccInj = cc != null ? nccInjectorField.get(cc) : null;
+                                        if (ccInj != null) {
+                                            if (ncciIconAreaField != null
+                                                    && ncciIconAreaField.get(ccInj) instanceof View iconArea) {
+                                                iconArea.setTranslationX(0f);
+                                                iconArea.setTranslationY(0f);
+                                                iconArea.setScaleX(1f);
+                                                iconArea.setScaleY(1f);
+                                                iconArea.setClipBounds(null);
+                                            }
+                                            if (ncciGroupHeaderField != null
+                                                    && ncciGroupHeaderField.get(ccInj) instanceof View gh) {
+                                                if (headerSetStackingDist != null) {
+                                                    headerSetStackingDist.invoke(gh, 0f);
+                                                }
+                                                if (pflSetSuperTransY != null) {
+                                                    pflSetSuperTransY.invoke(gh, gh.getTranslationY());
+                                                }
+                                                if (pflSetSuperScaleX != null) {
+                                                    pflSetSuperScaleX.invoke(gh, gh.getScaleX());
+                                                }
+                                                if (pflSetSuperScaleY != null) {
+                                                    pflSetSuperScaleY.invoke(gh, gh.getScaleY());
+                                                }
+                                                if (pflSetSuperAlpha != null) {
+                                                    pflSetSuperAlpha.invoke(gh, gh.getAlpha());
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Object inj = getViewInjector.invoke(parentView);
+                                    if (inj != null) {
+                                        boolean isLast = (injIsLastNotif != null && injIsLastNotif.getBoolean(inj))
+                                                || (injIsLastFocusNotif != null && injIsLastFocusNotif.getBoolean(inj));
+                                        float extTransY = (float) chain.getArg(1);
+                                        float actualH = (float) chain.getArg(2);
+                                        return calcWithTransition.invoke(
+                                                inj, parentView, extTransY, actualH, isLast, parentView.getPivotY());
+                                    }
+                                } catch (Throwable ignored) {}
+                                break;
+                            }
+                        }
+                    }
+                    return chain.proceed();
+                });
+            }
+
             module.hook(calcStacking).intercept(chain -> {
                 Object view = chain.getArg(0);
                 if (view != null) {
+                    int bigNotifH = 0;
+                    if (miuiBigHeightField != null) {
+                        try {
+                            bigNotifH = miuiBigHeightField.getInt(chain.getThisObject());
+                        } catch (Throwable ignored) {}
+                    }
                     for (PrioritySectionFrame frame : activeFrames.values()) {
                         if (frame == null) continue;
-                        if (frame.isFooter(view)) {
+                        if (frame.isFooter(view) || frame.isChildOfPriorityGroup(view)) {
                             return emptyInfo;
+                        }
+                        float origH = (float) chain.getArg(2);
+                        float footerReserve = frame.footerHeightReserveForDockedTail(view, origH, bigNotifH);
+                        if (footerReserve > 0f) {
+                            return chain.proceed(new Object[]{
+                                    view,
+                                    chain.getArg(1),
+                                    origH + footerReserve,
+                                    chain.getArg(3),
+                                    chain.getArg(4)
+                            });
                         }
                         float footerShift = frame.lockscreenStackingOffsetFor(view);
                         if (footerShift > 0f) {
                             float origY = (float) chain.getArg(1);
                             return chain.proceed(new Object[]{
-                                    view,
-                                    origY - footerShift,
-                                    chain.getArg(2),
-                                    chain.getArg(3),
-                                    chain.getArg(4)
+                                     view,
+                                     origY - footerShift,
+                                     origH,
+                                     chain.getArg(3),
+                                     chain.getArg(4)
                             });
                         }
                     }

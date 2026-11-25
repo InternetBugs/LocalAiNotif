@@ -10,13 +10,9 @@ final class PromotionNotification {
 
     private PromotionNotification() {}
 
-    /** 可参与推广收纳的通知：沿用分类资格，并排除聊天类会话。 */
+    /** 可参与推广收纳的通知：与分类资格保持一致，完全交由端侧模型判定。 */
     static boolean isCandidate(Notification notification) {
-        if (!ReduceInterruptions.isEligibleForClassification(notification)) return false;
-        if (Notification.CATEGORY_MESSAGE.equals(notification.category)) return false;
-        Bundle extras = notification.extras;
-        String template = extras == null ? null : extras.getString(Notification.EXTRA_TEMPLATE);
-        return template == null || !template.endsWith("$MessagingStyle");
+        return ReduceInterruptions.isEligibleForClassification(notification);
     }
 
     static boolean isMarked(StatusBarNotification item) {

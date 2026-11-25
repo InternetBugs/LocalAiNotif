@@ -106,9 +106,17 @@ public final class InferenceProvider extends ContentProvider {
     /** Matches explicit OTP / pickup / verification codes that must never be dropped or mutated. */
     private static final java.util.regex.Pattern EXPLICIT_CODE_PATTERN =
             java.util.regex.Pattern.compile(
-                    "(?i)(取件码|提货码|取货码|取餐码|核销码|兑换码|验证码|校验码|动态码|动态密码|确认码"
+                    "(?i)(取件码|提货码|取货码|取餐码|核销码|兑换码|验证码|校验码|动态码|动态密码|动态口令|确认码"
                     + "|verification\\s+code|security\\s+code|passcode|otp)"
-                    + "\\s*(?:为|是|:|：|#)?\\s*([A-Za-z0-9]{1,3}(?:-[A-Za-z0-9]{1,4}){1,3}|[A-Za-z0-9]{4,8})");
+                    + "\\s*(?:为|是|:|：|#|is\\b)?\\s*([A-Za-z0-9]{1,3}(?:-[A-Za-z0-9]{1,4}){1,3}|[A-Za-z0-9]{4,8})"
+                    + "(?![A-Za-z0-9-])(?!\\s*(?:分钟|分|秒|小时|天|条|次|个|笔|元|折|位))");
+    /** Matches any code literal (including truncated 3-digit fragments) emitted after a code label in summaries. */
+    private static final java.util.regex.Pattern SUMMARY_LABELED_CODE_PATTERN =
+            java.util.regex.Pattern.compile(
+                    "(?i)(取件码|提货码|取货码|取餐码|核销码|兑换码|验证码|校验码|动态码|动态密码|动态口令|确认码"
+                    + "|verification\\s+code|security\\s+code|passcode|otp)"
+                    + "\\s*(?:为|是|:|：|#|is\\b)?\\s*([A-Za-z0-9]{1,8}(?:-[A-Za-z0-9]{1,8}){1,3}|[A-Za-z0-9]{3,10})"
+                    + "(?![A-Za-z0-9-])(?!\\s*(?:分钟|分|秒|小时|天|条|次|个|笔|元|折|位))");
     /** Matches leaked prompt instructions or degenerate token loops from small models. */
     private static final java.util.regex.Pattern PROMPT_LEAK_PATTERN =
             java.util.regex.Pattern.compile("(?i)(?:/no_think|</?\\s*notif|手机通知摘要引擎|不得编造|只输出摘要正文)");
@@ -1135,6 +1143,7 @@ public final class InferenceProvider extends ContentProvider {
         int count = messages.size();
         int shown = Math.min(count, GROUP_PROMPT_ITEMS);
         int start = count - shown;
+        boolean hasExplicitCode = false;
         StringBuilder sb = new StringBuilder("以下是按时间从早到晚的通知")
                 .append(shown < total ? "（共" + total + "条中最新" + shown + "条）" : "")
                 .append("：\n<notif>\n");
@@ -1142,14 +1151,25 @@ public final class InferenceProvider extends ContentProvider {
             int i = start + k;
             String t = untag(safe(titles.get(i)));
             String c = LlmEngine.clip(untag(safe(messages.get(i))), GROUP_ITEM_TEXT_CLIP);
+            if (!hasExplicitCode && !extractExplicitCodes(t + " " + c).isEmpty()) {
+                hasExplicitCode = true;
+            }
             sb.append(k + 1).append(". ").append(t.isEmpty() ? app : t).append(": ").append(c)
               .append('\n');
         }
+        String lengthHint = shown >= 4
+                ? "（中文约25到52字，英文15到30词）"
+                : "（中文约20到40字，英文12到24词）";
         sb.append("</notif>\n")
-          .append("请合并精炼成自然连贯的1到2句第三人称短句（中文约20到40字，英文12到24词）。")
-          .append("同一人或同一件事合并概括，不要逐条照抄复述，严禁张冠李戴或改动时间与数字，")
-          .append("原样保留取件码、验证码、时间、金额、地点，删去客套话，")
-          .append("不要分点换行、不要加应用名或「等几条」等计数后缀，使用与原文相同语言，直接输出正文。")
+          .append("请合并精炼成自然连贯的1到2句第三人称短句").append(lengthHint).append("。")
+          .append("同一人或同一件事合并概括，不要逐条照抄复述，严禁张冠李戴或改动时间与数字，");
+        if (shown >= 4) {
+            sb.append("不必逐一罗列全部发件方名称，优先点明最关键的2到3项动态与金额")
+              .append(hasExplicitCode ? "，若提及验证码或取件码须完整写出最新一条的具体号码，" : "，同类事项合并概述，");
+        } else {
+            sb.append("原样保留取件码、验证码、时间、金额、地点，");
+        }
+        sb.append("删去客套话，不要分点换行、不要加应用名或「等几条」等计数后缀，使用与原文相同语言，直接输出正文。")
           .append(NO_THINK);
         return sb.toString();
     }
@@ -1170,13 +1190,16 @@ public final class InferenceProvider extends ContentProvider {
         List<String> fedTitles = new ArrayList<>(shown);
         for (int k = 0; k < shown; k++) {
             int i = count - 1 - k;
-            fedMessages.add(safe(messages.get(i)));
-            fedTitles.add(titles != null && i < titles.size() ? safe(titles.get(i)) : "");
+            fedMessages.add(LlmEngine.clip(untag(safe(messages.get(i))), GROUP_ITEM_TEXT_CLIP));
+            fedTitles.add(titles != null && i < titles.size() ? untag(safe(titles.get(i))) : "");
         }
 
         String stripped = stripThinkAndTags(rawModelOutput);
         if (stripped.isEmpty()) return null;
-        if (PROMPT_LEAK_PATTERN.matcher(stripped).find()) return null;
+        if (PROMPT_LEAK_PATTERN.matcher(stripped).find()) {
+            Log.i(TAG, "Rejected group summary: prompt leak");
+            return null;
+        }
 
         String cleaned = cleanGroupProse(stripped, app);
         if (cleaned.isEmpty()) return null;
@@ -1185,11 +1208,17 @@ public final class InferenceProvider extends ContentProvider {
                 app, effectiveTotal, shown, distinctTitles, titles);
 
         if (!isAcceptableGroupSummary(cleaned, stripped, effectiveTotal, appendSuffix, fedMessages, fedTitles)) {
+            Log.i(TAG, "Rejected group summary: failed quality or fidelity guardrail");
             return null;
         }
 
         String bounded = clipNatural(cleaned, GROUP_MAX_BODY_UNITS);
-        if (bounded.isEmpty()) return null;
+        if (bounded.isEmpty() || displayUnits(bounded) < 4) return null;
+        if (!bounded.equals(cleaned)
+                && dropsRequiredExplicitCode(bounded, effectiveTotal, appendSuffix, fedMessages, fedTitles)) {
+            Log.i(TAG, "Rejected group summary: explicit code lost or truncated by length cap");
+            return null;
+        }
         return appendSuffix ? appendOverflowSuffix(bounded, effectiveTotal) : bounded;
     }
 
@@ -1377,57 +1406,74 @@ public final class InferenceProvider extends ContentProvider {
 
     private static boolean dropsRequiredExplicitCode(String summary, int total, boolean overflowGroup,
             List<String> fedMessages, List<String> fedTitles) {
-        String normSummaryCodes = summary.replaceAll("[\\s-]+", "").toUpperCase(java.util.Locale.ROOT);
-        String lowerSummary = summary.toLowerCase(java.util.Locale.ROOT);
+        java.util.HashSet<String> allSourceCodes = new java.util.HashSet<>();
+        ArrayList<String> requiredCodes = new ArrayList<>(4);
+        boolean seenOtp = false;
+
+        // fedMessages is ordered newest-first (k == 0 is newest).
         for (int k = 0; k < fedMessages.size(); k++) {
             String title = k < fedTitles.size() ? safe(fedTitles.get(k)) : "";
             String msg = safe(fedMessages.get(k));
             List<CodeMatch> codes = extractExplicitCodes(title + " " + msg);
             if (codes.isEmpty()) continue;
 
-            boolean mustKeep = total <= 3 || k == 0 || (!overflowGroup && k < 2);
-            if (!mustKeep) {
-                boolean mentionsTitle = title.length() >= 2
-                        && lowerSummary.contains(title.toLowerCase(java.util.Locale.ROOT));
-                boolean mentionsCodeTopic = false;
+            if (total <= 1) {
                 for (CodeMatch cm : codes) {
-                    if (summaryMentionsCodeTopic(lowerSummary, cm.label)) {
-                        mentionsCodeTopic = true;
-                        break;
+                    allSourceCodes.add(cm.normalizedCode);
+                    requiredCodes.add(cm.normalizedCode);
+                }
+                continue;
+            }
+
+            boolean addedOtpFromThisItem = false;
+            for (CodeMatch cm : codes) {
+                allSourceCodes.add(cm.normalizedCode);
+                // In compact groups (2–3 items, no overflow suffix), preserve all distinct parcel/pickup
+                // codes and at least the newest OTP/verification code. In dense multi-item groups
+                // (total >= 4), high-level topic consolidation without reciting raw digits is allowed
+                // provided no mutated or hallucinated code literal is emitted below.
+                if (total <= 3) {
+                    if (isPickupCodeLabel(cm.label)) {
+                        requiredCodes.add(cm.normalizedCode);
+                    } else if (!seenOtp || addedOtpFromThisItem) {
+                        requiredCodes.add(cm.normalizedCode);
+                        seenOtp = true;
+                        addedOtpFromThisItem = true;
                     }
                 }
-                mustKeep = mentionsTitle || mentionsCodeTopic;
             }
-            if (!mustKeep) continue;
+        }
 
-            for (CodeMatch cm : codes) {
-                if (!normSummaryCodes.contains(cm.normalizedCode)) {
-                    return true;
-                }
+        // 1. Strict anti-mutation / anti-hallucination across ALL group sizes (including total >= 4):
+        // any explicit or truncated code literal attached to a code label in the summary must exist
+        // verbatim in the source notifications.
+        java.util.regex.Matcher summaryCodes = SUMMARY_LABELED_CODE_PATTERN.matcher(summary);
+        while (summaryCodes.find()) {
+            String rawCode = summaryCodes.group(2);
+            if (rawCode == null) continue;
+            String normalized = rawCode.replaceAll("[\\s-]+", "").toUpperCase(java.util.Locale.ROOT);
+            if (containsAsciiDigit(normalized) && !allSourceCodes.contains(normalized)) {
+                return true;
+            }
+        }
+
+        if (allSourceCodes.isEmpty() || requiredCodes.isEmpty()) return false;
+
+        // 2. Verify required codes for single recaps and compact (<= 3) groups.
+        String normSummaryCodes = summary.replaceAll("[\\s-]+", "").toUpperCase(java.util.Locale.ROOT);
+        for (String req : requiredCodes) {
+            if (!normSummaryCodes.contains(req)) {
+                return true;
             }
         }
         return false;
     }
 
-    private static boolean summaryMentionsCodeTopic(String lowerSummary, String label) {
+    private static boolean isPickupCodeLabel(String label) {
+        if (label == null) return false;
         String l = label.toLowerCase(java.util.Locale.ROOT);
-        if (l.contains("取件") || l.contains("提货") || l.contains("取货")) {
-            return lowerSummary.contains("取件") || lowerSummary.contains("提货")
-                    || lowerSummary.contains("取货") || lowerSummary.contains("驿站")
-                    || lowerSummary.contains("快递") || lowerSummary.contains("包裹")
-                    || lowerSummary.contains("丰巢") || lowerSummary.contains("快件");
-        }
-        if (l.contains("取餐")) {
-            return lowerSummary.contains("取餐") || lowerSummary.contains("出餐");
-        }
-        if (l.contains("验证") || l.contains("校验") || l.contains("动态") || l.contains("确认")
-                || l.contains("otp") || l.contains("code") || l.contains("passcode")) {
-            return lowerSummary.contains("验证") || lowerSummary.contains("校验")
-                    || lowerSummary.contains("动态") || lowerSummary.contains("登录")
-                    || lowerSummary.contains("code") || lowerSummary.contains("otp")
-                    || lowerSummary.contains("passcode");
-        }
-        return lowerSummary.contains(l);
+        return l.contains("取件") || l.contains("提货") || l.contains("取货")
+                || l.contains("取餐") || l.contains("核销") || l.contains("兑换");
     }
 
     private record CodeMatch(String label, String normalizedCode) {}
@@ -1522,6 +1568,11 @@ public final class InferenceProvider extends ContentProvider {
         int minCut = body.length() * 6 / 10;
         for (int i = body.length() - 1; i >= minCut; i--) {
             char c = body.charAt(i);
+            if (c == ',' && i > 0 && i + 1 < s.length()
+                    && isAsciiDigit(s.charAt(i - 1)) && isAsciiDigit(s.charAt(i + 1))) {
+                // Never treat a thousands separator (e.g. "1,288.00") as a clause break.
+                continue;
+            }
             if (c == '。' || c == '；' || c == '，' || c == ';' || c == ',') {
                 String trimmed = body.substring(0, i).trim();
                 if (!trimmed.isEmpty()) return trimmed;
@@ -1544,7 +1595,32 @@ public final class InferenceProvider extends ContentProvider {
             units += w;
             end += Character.charCount(cp);
         }
-        return s.substring(0, end) + "…";
+        // Avoid slicing right through an ASCII number, amount, time, or code token (e.g. "1,288.00" or "382911").
+        if (end > 0 && end < s.length()
+                && isAsciiTokenChar(s, end - 1) && isAsciiTokenChar(s, end)) {
+            int tokenStart = end - 1;
+            while (tokenStart > 0 && isAsciiTokenChar(s, tokenStart - 1)) {
+                tokenStart--;
+            }
+            if (tokenStart > 0 && tokenStart >= end * 7 / 10) {
+                end = tokenStart;
+            }
+        }
+        return s.substring(0, end).stripTrailing() + "…";
+    }
+
+    private static boolean isAsciiDigit(char c) {
+        return c >= '0' && c <= '9';
+    }
+
+    private static boolean isAsciiTokenChar(String s, int idx) {
+        char c = s.charAt(idx);
+        if (isAsciiDigit(c) || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+                || c == '.' || c == '-' || c == ':') {
+            return true;
+        }
+        return c == ',' && idx > 0 && idx + 1 < s.length()
+                && isAsciiDigit(s.charAt(idx - 1)) && isAsciiDigit(s.charAt(idx + 1));
     }
 
     /** Matches echoed prompt headers like "应用「Shell」的通知摘要：" or standalone "通知摘要". */
