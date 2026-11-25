@@ -9,7 +9,7 @@ on:
         type: string
         default: ""
       release_title:
-        description: "Release title (leave blank for 'LocalAiNotif <tag>')"
+        description: "Release title (leave blank for 'LocalAiNotif For HyperOS <tag>')"
         required: false
         type: string
         default: ""
@@ -82,7 +82,7 @@ jobs:
             exit 1
           fi
 
-          TITLE="${INPUT_TITLE:-LocalAiNotif ${TAG}}"
+          TITLE="${INPUT_TITLE:-LocalAiNotif For HyperOS ${TAG}}"
           APK_NAME="LocalAiNotif-v${VERSION}.apk"
 
           {

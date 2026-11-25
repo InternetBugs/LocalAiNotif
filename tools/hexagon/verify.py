@@ -8,7 +8,7 @@ def verify(read_library):
     host = read_library("libMNN_htpops.so")
     if host[:6] != b"\x7fELF\x02\x01" or struct.unpack_from("<HH", host, 16) != (3, 183):
         sys.exit("Invalid arm64 FastRPC host library")
-    if b"Java_com_localai_notif_LlmEngine_nativeHexagonArch\0" not in host:
+    if b"Java_io_github_internetbugs_localainotif_LlmEngine_nativeHexagonArch\0" not in host:
         sys.exit("FastRPC host library lacks the device architecture probe")
     for version in ("73", "75", "79", "81", "83", "85"):
         name = f"libMNN_htpops_skelV{version}.so"

@@ -199,8 +199,8 @@ private:
 }  // namespace
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_com_localai_notif_LlmEngine_nativeCreate(JNIEnv* env, jclass, jbyteArray configPath,
-                                              jbyteArray backend, jbyteArray optionsJson) {
+Java_io_github_internetbugs_localainotif_LlmEngine_nativeCreate(JNIEnv* env, jclass, jbyteArray configPath,
+                                                                jbyteArray backend, jbyteArray optionsJson) {
     try {
         std::string path = readBytes(env, configPath);
         if (env->ExceptionCheck() || path.empty()) return 0;
@@ -240,9 +240,9 @@ Java_com_localai_notif_LlmEngine_nativeCreate(JNIEnv* env, jclass, jbyteArray co
 }
 
 extern "C" JNIEXPORT jbyteArray JNICALL
-Java_com_localai_notif_LlmEngine_nativeGenerate(JNIEnv* env, jclass, jlong ptr,
-                                                jbyteArray systemPrompt, jbyteArray userPrompt,
-                                                jint maxNewTokens, jint expectedJsonItems) {
+Java_io_github_internetbugs_localainotif_LlmEngine_nativeGenerate(JNIEnv* env, jclass, jlong ptr,
+                                                                  jbyteArray systemPrompt, jbyteArray userPrompt,
+                                                                  jint maxNewTokens, jint expectedJsonItems) {
     Llm* llm = reinterpret_cast<Llm*>(ptr);
     if (llm == nullptr) return nullptr;
     try {
@@ -282,7 +282,7 @@ Java_com_localai_notif_LlmEngine_nativeGenerate(JNIEnv* env, jclass, jlong ptr,
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_localai_notif_LlmEngine_nativeDestroy(JNIEnv*, jclass, jlong ptr) {
+Java_io_github_internetbugs_localainotif_LlmEngine_nativeDestroy(JNIEnv*, jclass, jlong ptr) {
     Llm* llm = reinterpret_cast<Llm*>(ptr);
     if (llm != nullptr) {
         try {

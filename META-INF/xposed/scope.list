@@ -2,4 +2,4 @@ system
 com.miui.notification
 com.android.settings
 com.android.systemui
-com.localai.notif
+io.github.internetbugs.localainotif

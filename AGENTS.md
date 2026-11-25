@@ -1,4 +1,4 @@
-# LocalAiNotif Agent 开发指引
+# LocalAiNotif For HyperOS Agent 开发指引
 
 本仓库为面向小米 15（HyperOS 4.0.3.0 / Android 17）的 LSPosed 本地端侧通知智能模块。详细架构与历史进度见 `docs/设计.md` 与 `docs/交接.md`。
 
@@ -6,7 +6,7 @@
 
 - **技术栈**：纯 Java 17（`javac --release 17`）+ Android Framework 原生 View API + C++17 JNI（MNN-LLM）。**无 Gradle、无 Kotlin、无 AndroidX、无 Compose、无 Material3 / Miuix**。
 - **禁止引用 `R.*`**：`build.sh` 中 `javac` 仅编译 `src/` 下源码，未将 `build/gen` 纳入编译路径。所有 UI 布局、Drawable、图标与样式必须采用纯 Java View / Canvas / Drawable 实现。
-- **跨进程配置契约**：`MainActivity` 不得直接读写 `SharedPreferences`；所有配置读写必须通过 `ContentResolver.call(content://com.localai.notif.provider, ...)` 与独立 `:inference` 进程的 `InferenceProvider` 通信，并在后台线程调用、回主线程前检查 `isFinishing() || isDestroyed()`。
+- **跨进程配置契约**：`MainActivity` 不得直接读写 `SharedPreferences`；所有配置读写必须通过 `ContentResolver.call(content://io.github.internetbugs.localainotif.provider, ...)` 与独立 `:inference` 进程的 `InferenceProvider` 通信，并在后台线程调用、回主线程前检查 `isFinishing() || isDestroyed()`。
 - **修改边界**：改动设置页时不要波及 Xposed Hook（`ModuleMain` / `NotificationSummaries` / `SystemUi*` / `PrioritySectionFrame`）、`InferenceProvider` 或 `AndroidManifest.xml`。
 - **签名与构建契约（严禁回退或泄漏密钥）**：
   - `build.sh` 兼容 Windows Git Bash 与 Linux（Ubuntu CI），仅清理 `build/`、保留 `dist/` 既有 APK，支持通过 `DIST_DIR` 指定临时输出目录；修改 `build.sh` 时必须保持 Linux 兼容性。
@@ -17,7 +17,7 @@
 
 ## 设置页面小米 UI（HyperOS）设计规范（必须沿用）
 
-设置页已完成小米澎湃 OS（HyperOS）风格重构并经小米 15 实机验收。后续扩展 M4（减少干扰）、M6（完整配置页）或任何新增子页/弹窗/开关时，**必须直接复用并严格沿用** `src/com/localai/notif/HyperSettingsUi.java` 与 `src/com/localai/notif/MainActivity.java` 确立的视觉语言，禁止回退到原生 `android.widget.Switch`、Material 圆形 `RippleDrawable`、投影卡片或居中堆叠布局。
+设置页已完成小米澎湃 OS（HyperOS）风格重构并经小米 15 实机验收。后续扩展 M4（减少干扰）、M6（完整配置页）或任何新增子页/弹窗/开关时，**必须直接复用并严格沿用** `src/io/github/internetbugs/localainotif/HyperSettingsUi.java` 与 `src/io/github/internetbugs/localainotif/MainActivity.java` 确立的视觉语言，禁止回退到原生 `android.widget.Switch`、Material 圆形 `RippleDrawable`、投影卡片或居中堆叠布局。
 
 ### 1. 深浅色语义色板（`HyperSettingsUi.Palette`）
 

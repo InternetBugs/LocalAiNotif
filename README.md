@@ -1,12 +1,12 @@
 <p align="center">
-  <img src="docs/images/banner-overview.png" alt="LocalAiNotif — 本地端大模型驱动的 HyperOS 智能通知模块" width="100%">
+  <img src="docs/images/banner-overview.png" alt="LocalAiNotif For HyperOS — 本地端大模型驱动的 HyperOS 智能通知模块" width="100%">
 </p>
 
-# LocalAiNotif
+# LocalAiNotif For HyperOS
 
 > 本地端大模型驱动的 HyperOS 智能通知模块（LSPosed · 100% 离线端侧推理）
 
-**LocalAiNotif** 是一款面向小米澎湃 OS（HyperOS）的开源 LSPosed 模块。模块内置 [MNN-LLM](https://github.com/alibaba/MNN) 端侧推理引擎，在设备本地运行 **Qwen3.5** 量化模型，按 **Hexagon NPU → Vulkan GPU → CPU** 自动选择并回退推理后端。模块为系统通知中心、锁屏、状态栏、音量面板与小米超级岛带来 **AI 通知摘要**、**单条长通知 AI 概括**、**重要通知专区**、**噪音过滤** 与 **减少干扰模式**。所有通知文本均在手机本地完成处理，**无需云端 API、不上传任何隐私数据、不依赖小米云控或小米账号**。
+**LocalAiNotif For HyperOS** 是一款面向小米澎湃 OS（HyperOS）的开源 LSPosed 模块。模块内置 [MNN-LLM](https://github.com/alibaba/MNN) 端侧推理引擎，在设备本地运行 **Qwen3.5** 量化模型，按 **Hexagon NPU → Vulkan GPU → CPU** 自动选择并回退推理后端。模块为系统通知中心、锁屏、状态栏、音量面板与小米超级岛带来 **AI 通知摘要**、**单条长通知 AI 概括**、**重要通知专区**、**噪音过滤** 与 **减少干扰模式**。所有通知文本均在手机本地完成处理，**无需云端 API、不上传任何隐私数据、不依赖小米云控或小米账号**。
 
 ---
 
@@ -111,20 +111,20 @@
 ## 快速上手
 
 ### 第一步：安装与激活模块
-1. 前往 [Releases](https://github.com/InternetBugs/LocalAiNotif/releases) 下载最新正式版安装包（不含模型权重，体积轻巧）：
+1. 前往 [Releases](https://github.com/InternetBugs/LocalAiNotif-For-HyperOS/releases) 下载最新正式版安装包（不含模型权重，体积轻巧）：
    - `LocalAiNotif-v<version>.apk`（**Release**）：关闭应用调试，推荐日常使用。
    - `LocalAiNotif-v<version>-debug.apk`（**Debug**）：开启调试模式，适合排查问题或通过已授权的 ADB 使用 `run-as`。
    - 两个包功能、包名和正式签名完全一致，任选其一安装即可。
-2. 打开 **LSPosed 管理器**，启用 **端侧AI通知总结（LocalAiNotif）**，确认以下 **5 个静态作用域**（见 [scope.list](META-INF/xposed/scope.list)）已勾选：
+2. 打开 **LSPosed 管理器**，启用 **端侧AI通知总结 For HyperOS（LocalAiNotif For HyperOS）**，确认以下 **5 个静态作用域**（见 [scope.list](META-INF/xposed/scope.list)）已勾选：
    - **系统框架** (`system`)
    - **系统界面** (`com.android.systemui`)
    - **通知管理 / 通知中心** (`com.miui.notification`)
    - **设置** (`com.android.settings`)
-   - **端侧AI通知总结** (`com.localai.notif`，用于「关于」页读取框架信息与激活状态)
+   - **端侧AI通知总结 For HyperOS** (`io.github.internetbugs.localainotif`，用于「关于」页读取框架信息与激活状态)
 3. **软重启或重启手机**使 Hook 生效（更新版本后若涉及系统 Hook 变更，软重启一次即可）。
 
 ### 第二步：下载或导入本地模型
-1. 打开 **端侧AI通知总结**，进入「本地模型 › 端侧模型」。
+1. 打开 **端侧AI通知总结 For HyperOS**，进入「本地模型 › 端侧模型」。
 2. 选择下载源（国内网络推荐默认的**魔搭社区 ModelScope** 或 **HF-Mirror**）。
 3. 下载预设模型 **Qwen3.5-0.8B（推荐）** 或 **Qwen3.5-2B** 并设为当前模型；也可以直接导入手机本地已有的 MNN-LLM 模型目录。
 
@@ -199,8 +199,8 @@ A：模型未就绪时按 fail-closed 策略保持安静，此时「减少干扰
 **Q：「减少干扰」和系统自带「勿扰模式」有什么区别？**  
 A：系统原生「勿扰模式」只能按静态白名单/联系人放行；「减少干扰」在复用系统勿扰底层机制与原生定时的同时叠加本地大模型语义判断，让非白名单应用里的紧急验证码、支付风控、日程变动等也能单次完整补发提醒。两者在控制中心与音量面板严格互斥，点按原生「勿扰模式」即可切回传统严格勿扰。
 
-**Q：为什么需要 `com.miui.notification`、`com.android.settings` 和 `com.localai.notif` 作用域？**  
-A：`com.miui.notification` 用于运行时虚拟保持系统 AI 通知状态并屏蔽小米云端下载弹窗；`com.android.settings` 用于开启原生设置支持以及在「设置 › 通知与状态栏」的「小米超级岛」下方注入可选入口；`com.localai.notif` 用于在「关于」页自检 LSPosed 框架版本与模块激活状态。
+**Q：为什么需要 `com.miui.notification`、`com.android.settings` 和 `io.github.internetbugs.localainotif` 作用域？**  
+A：`com.miui.notification` 用于运行时虚拟保持系统 AI 通知状态并屏蔽小米云端下载弹窗；`com.android.settings` 用于开启原生设置支持以及在「设置 › 通知与状态栏」的「小米超级岛」下方注入可选入口；`io.github.internetbugs.localainotif` 用于在「关于」页自检 LSPosed 框架版本与模块激活状态。
 
 ---
 
@@ -246,7 +246,7 @@ BUILD_TYPE=release SIGNING_CONFIG=/path/to/signing-backup.json bash build.sh
 
 | 路径 | 说明 |
 |---|---|
-| `src/com/localai/notif/` | 纯 Java 17 模块源码（`ModuleMain`、`NotificationSummaries`、`InferenceProvider`、`LlmEngine`、`Classifier`、`SystemUi*`、`PrioritySectionFrame`、`PriorityShadeRevealAnimator`、`GlowStyle`、`NebulaSummaryVisuals`、`MainActivity`、`HyperSettingsUi`、`AboutActivity` 等） |
+| `src/io/github/internetbugs/localainotif/` | 纯 Java 17 模块源码（`ModuleMain`、`NotificationSummaries`、`InferenceProvider`、`LlmEngine`、`Classifier`、`SystemUi*`、`PrioritySectionFrame`、`PriorityShadeRevealAnimator`、`GlowStyle`、`NebulaSummaryVisuals`、`MainActivity`、`HyperSettingsUi`、`AboutActivity` 等） |
 | `jni/` | MNN-LLM JNI 封装（`localai_llm_jni.cpp`）与 Hexagon 投影/归一化桥接（`MnnHexagon.cmake`、`HexagonProjectionFactory.cpp`） |
 | `libs/hexagon/` | 随 APK 打包的 Android FastRPC 接口库（`libMNN_htpops.so`）与 `v73 / v75 / v79 / v81 / v83 / v85` 六代 Hexagon DSP 算子库 |
 | `tools/hexagon/` | 多代 Hexagon DSP 算子库构建脚本（`build-ops.sh`）、FastRPC 架构探测（`device.c`）与包体校验工具（`verify.py`） |
