@@ -194,7 +194,8 @@ public final class AboutActivity extends Activity {
         projectCard.addView(HyperSettingsUi.createInsetDivider(this, mPalette));
 
         HyperSettingsUi.NavRowParts repoRow = HyperSettingsUi.createNavRow(
-                this, mPalette, "GitHub 仓库", null, "InternetBugs/LocalAiNotif-For-HyperOS", false, false, false);
+                this, mPalette, "GitHub 仓库", null, null, false, false, false);
+        HyperSettingsUi.setWrappingPathValue(this, repoRow, "InternetBugs/LocalAiNotif-For-HyperOS");
         repoRow.row.setOnClickListener(v -> openExternalUrl(REPO_URL));
         projectCard.addView(repoRow.row);
         projectCard.addView(HyperSettingsUi.createInsetDivider(this, mPalette));

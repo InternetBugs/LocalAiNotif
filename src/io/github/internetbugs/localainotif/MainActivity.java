@@ -27,6 +27,7 @@ import java.util.concurrent.Executors;
 public final class MainActivity extends Activity implements ModelDownloadManager.Listener {
     private static final Uri PROVIDER = Uri.parse("content://" + Config.AUTHORITY);
     private static final Executor OPTION_IO = Executors.newSingleThreadExecutor();
+    private static final String SYSTEM_SETTINGS_TITLE = "端侧AI通知总结";
     private static final String STATE_PRIORITY_ENABLED = "state_priority_enabled";
     private static final String STATE_GROUP_SUMMARY = "state_group_summary";
     private static final String STATE_RECAP_SCREEN_ON = "state_recap_screen_on";
@@ -157,6 +158,12 @@ public final class MainActivity extends Activity implements ModelDownloadManager
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
+        String pageTitle = resolvePageTitle(intent);
+        setTitle(pageTitle);
+        if (mPage != null) {
+            mPage.largeTitle.setText(pageTitle);
+            mPage.collapsedTitle.setText(pageTitle);
+        }
         showRequestedSection(intent);
     }
 
@@ -273,10 +280,13 @@ public final class MainActivity extends Activity implements ModelDownloadManager
             boolean initialReduceFilterIcons,
             boolean initialReduceSounds,
             boolean initialAlwaysLoad, boolean initialPromotionFilter) {
-        boolean showBackButton = getIntent().getBooleanExtra(Config.EXTRA_FROM_SYSTEM_SETTINGS, false)
-                || Config.ACTION_PROMOTION_SETTINGS.equals(getIntent().getAction());
+        Intent launchIntent = getIntent();
+        boolean showBackButton = isFromSystemSettings(launchIntent)
+                || (launchIntent != null && Config.ACTION_PROMOTION_SETTINGS.equals(launchIntent.getAction()));
+        String pageTitle = resolvePageTitle(launchIntent);
+        setTitle(pageTitle);
         HyperSettingsUi.PageShell shell = HyperSettingsUi.buildPageShell(
-                this, mPalette, resolveAppTitle(), showBackButton);
+                this, mPalette, pageTitle, showBackButton);
         mPage = shell;
         LinearLayout content = shell.content;
 
@@ -1219,6 +1229,17 @@ public final class MainActivity extends Activity implements ModelDownloadManager
             mModelRow.value.setText("去下载");
             mModelRow.summary.setText("未下载模型，下载后启用端侧 AI 识别与摘要。");
         }
+    }
+
+    private String resolvePageTitle(Intent intent) {
+        if (isFromSystemSettings(intent)) {
+            return SYSTEM_SETTINGS_TITLE;
+        }
+        return resolveAppTitle();
+    }
+
+    private static boolean isFromSystemSettings(Intent intent) {
+        return intent != null && intent.getBooleanExtra(Config.EXTRA_FROM_SYSTEM_SETTINGS, false);
     }
 
     private String resolveAppTitle() {

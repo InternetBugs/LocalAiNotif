@@ -28,6 +28,11 @@ on:
         required: false
         type: boolean
         default: false
+      sync_xposed_repo:
+        description: "Sync stable release to Xposed-Modules-Repo (skipped for drafts/prereleases; requires XPOSED_REPO_TOKEN secret)"
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -42,6 +47,7 @@ env:
   BUILD_TOOLS_VERSION: 35.0.0
   NDK_VERSION: 28.2.13676358
   EXPECTED_CERT_SHA256: 89034f48bdf131455ede17c3608729367295d3533a73fa23181585143081cecc
+  XPOSED_REPO: Xposed-Modules-Repo/io.github.internetbugs.localainotif
 
 jobs:
   release:
@@ -63,6 +69,10 @@ jobs:
           VERSION_CODE="$(sed -n 's/.*android:versionCode="\([^"]*\)".*/\1/p' AndroidManifest.xml)"
           if [ -z "$VERSION" ]; then
             echo "::error::Failed to parse android:versionName from AndroidManifest.xml"
+            exit 1
+          fi
+          if ! [[ "$VERSION_CODE" =~ ^[0-9]+$ ]]; then
+            echo "::error::Failed to parse numeric android:versionCode from AndroidManifest.xml (got '$VERSION_CODE')"
             exit 1
           fi
 
@@ -390,3 +400,90 @@ jobs:
           fi
 
           gh "${ARGS[@]}"
+
+      - name: Sync release to Xposed Modules Repo
+        if: ${{ inputs.sync_xposed_repo && !inputs.draft && !inputs.prerelease }}
+        env:
+          XPOSED_REPO_TOKEN: ${{ secrets.XPOSED_REPO_TOKEN }}
+          MAIN_GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_NOTES: ${{ inputs.release_notes }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          VERSION_CODE: ${{ steps.meta.outputs.version_code }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          APK_NAME: ${{ steps.meta.outputs.apk_name }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$XPOSED_REPO_TOKEN" ]; then
+            echo "::warning::XPOSED_REPO_TOKEN secret is not set; skipping sync to ${XPOSED_REPO}."
+            {
+              echo "### Xposed Modules Repo 同步已跳过"
+              echo
+              echo "未配置 \`XPOSED_REPO_TOKEN\` Secret，本次未自动同步到 \`${XPOSED_REPO}\`。"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          export GH_TOKEN="$XPOSED_REPO_TOKEN"
+          XPOSED_TAG="${VERSION_CODE}-${VERSION// /_}"
+
+          if gh release view "$XPOSED_TAG" --repo "$XPOSED_REPO" >/dev/null 2>&1; then
+            echo "::error::Release '${XPOSED_TAG}' already exists in ${XPOSED_REPO}. Bump android:versionCode / versionName in AndroidManifest.xml first."
+            exit 1
+          fi
+
+          SYNC_DIR="${RUNNER_TEMP}/xposed-sync"
+          rm -rf "$SYNC_DIR"
+          mkdir -p "$SYNC_DIR"
+          trap 'rm -rf "$SYNC_DIR"' EXIT
+
+          printf '%s' "$INPUT_NOTES" > "$SYNC_DIR/input-notes.md"
+          GH_TOKEN="$MAIN_GH_TOKEN" gh release view "$TAG" \
+            --repo "${{ github.repository }}" \
+            --json body --jq '.body // ""' > "$SYNC_DIR/main-release-body.md"
+
+          AUTH_B64="$(printf 'x-access-token:%s' "$XPOSED_REPO_TOKEN" | base64 | tr -d '\n')"
+          export GIT_TERMINAL_PROMPT=0
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0="http.https://github.com/.extraheader"
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${AUTH_B64}"
+
+          git clone --depth 1 --branch main "https://github.com/${XPOSED_REPO}.git" "$SYNC_DIR/repo"
+
+          python3 tools/xposed-repo/prepare_sync.py \
+            --source-readme README.md \
+            --source-license LICENSE \
+            --version "$VERSION" \
+            --version-code "$VERSION_CODE" \
+            --tag "$TAG" \
+            --source-repo "${{ github.repository }}" \
+            --xposed-repo "$XPOSED_REPO" \
+            --input-notes-file "$SYNC_DIR/input-notes.md" \
+            --main-release-body-file "$SYNC_DIR/main-release-body.md" \
+            --out-repo-dir "$SYNC_DIR/repo" \
+            --out-notes-file "$SYNC_DIR/xposed-notes.md"
+
+          if [ -n "$(git -C "$SYNC_DIR/repo" status --porcelain)" ]; then
+            git -C "$SYNC_DIR/repo" config user.name "github-actions[bot]"
+            git -C "$SYNC_DIR/repo" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git -C "$SYNC_DIR/repo" add README.md LICENSE SOURCE_URL SUMMARY
+            git -C "$SYNC_DIR/repo" commit -m "chore: sync metadata for v${VERSION} (${VERSION_CODE})"
+            git -C "$SYNC_DIR/repo" push origin main
+          else
+            echo "No metadata changes to push to ${XPOSED_REPO}."
+          fi
+
+          gh release create "$XPOSED_TAG" \
+            "dist/${APK_NAME}" \
+            --repo "$XPOSED_REPO" \
+            --target main \
+            --title "$VERSION" \
+            --notes-file "$SYNC_DIR/xposed-notes.md"
+
+          {
+            echo "### 已同步至 Xposed Modules Repo"
+            echo
+            echo "- 仓库：\`${XPOSED_REPO}\`"
+            echo "- Release：[${XPOSED_TAG}](https://github.com/${XPOSED_REPO}/releases/tag/${XPOSED_TAG})"
+            echo "- 附件：\`${APK_NAME}\`（仅同步正式版 Release APK）"
+          } >> "$GITHUB_STEP_SUMMARY"

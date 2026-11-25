@@ -1029,6 +1029,29 @@ final class HyperSettingsUi {
         view.setContentDescription(path);
     }
 
+    static void setWrappingPathValue(Context context, NavRowParts parts, String path) {
+        if (parts.title.getParent() instanceof View textCol) {
+            LinearLayout.LayoutParams textLp = (LinearLayout.LayoutParams) textCol.getLayoutParams();
+            if (textLp != null) {
+                textLp.width = ViewGroup.LayoutParams.WRAP_CONTENT;
+                textLp.weight = 0f;
+                textCol.setLayoutParams(textLp);
+            }
+        }
+        LinearLayout.LayoutParams valueLp = (LinearLayout.LayoutParams) parts.value.getLayoutParams();
+        if (valueLp != null) {
+            valueLp.width = 0;
+            valueLp.weight = 1f;
+            parts.value.setLayoutParams(valueLp);
+        }
+        parts.value.setGravity(Gravity.END);
+        parts.value.setLineSpacing(dp(context, 2), 1.0f);
+        parts.value.setHyphenationFrequency(android.text.Layout.HYPHENATION_FREQUENCY_NONE);
+        setPathText(parts.value, path);
+        parts.value.setBreakStrategy(android.text.Layout.BREAK_STRATEGY_BALANCED);
+        parts.value.setVisibility(View.VISIBLE);
+    }
+
     static Dialog createBottomSheetDialog(Activity activity, Palette palette) {
         Dialog dialog = new Dialog(activity);
         dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
